@@ -131,6 +131,7 @@
       "type": "object",
       "properties": {
         "execution_id": { "type": "string" },
+        "request_id": { "type": "string" },
         "tool_id": { "type": "string" },
         "operation": { "type": "string", "enum": ["APPLY", "ROLLBACK"] },
         "user_id": { "type": "string" },
@@ -141,7 +142,7 @@
         "completed_at": { "type": "string" },
         "created_at": { "type": "string" }
       },
-      "required": ["execution_id", "tool_id", "operation", "user_id", "device_id", "status", "issued_at", "expires_at"]
+      "required": ["execution_id", "request_id", "tool_id", "operation", "user_id", "device_id", "status", "issued_at", "expires_at"]
     }
   },
   "firestore": {

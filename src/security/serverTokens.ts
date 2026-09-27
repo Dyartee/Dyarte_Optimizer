@@ -6,6 +6,7 @@ export type OptimizationOperation = 'APPLY' | 'ROLLBACK';
 export interface OptimizationTokenPayload {
   protocol_version: number;
   execution_id: string;
+  request_id: string;
   operation: OptimizationOperation;
   tool_id: string;
   user_id: string;
@@ -196,7 +197,8 @@ export function generateOptimizationExecutionToken(
   deviceId: string,
   ttlSeconds: number = 60,
   operation: OptimizationOperation = 'APPLY',
-  executionId?: string
+  executionId?: string,
+  requestId?: string
 ): string {
   if (!toolId || typeof toolId !== 'string' || toolId.trim().length === 0) {
     throw new Error('tool_id é obrigatório para geração do token de execução.');
@@ -215,10 +217,12 @@ export function generateOptimizationExecutionToken(
   // Standard TTL: 60s, maximum: 60s
   const effectiveTtl = Math.min(60, ttlSeconds);
   const execId = executionId || `exec_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+  const reqId = requestId || `req_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
 
   const payloadObj: OptimizationTokenPayload = {
     protocol_version: 1,
     execution_id: execId,
+    request_id: reqId,
     operation,
     tool_id: toolId,
     user_id: userId,
@@ -255,6 +259,8 @@ export function verifyOptimizationExecutionToken(
   expectedDeviceId?: string,
   expectedOperation?: OptimizationOperation,
   expectedUserId?: string,
+  expectedRequestId?: string,
+  expectedExecutionId?: string,
   clockSkewSeconds: number = 15
 ): TokenVerificationResult {
   if (!tokenStr || typeof tokenStr !== 'string' || tokenStr.trim().length === 0) {
@@ -332,7 +338,15 @@ export function verifyOptimizationExecutionToken(
     return { valid: false, error_code: 'DEVICE_MISMATCH', error: `Dispositivo do token ('${payload.device_id}') diverge do dispositivo esperado ('${expectedDeviceId}').` };
   }
 
-  // 6. Timestamps & TTL validation
+  // 6. Request ID and Execution ID matching
+  if (expectedRequestId && payload.request_id !== expectedRequestId) {
+    return { valid: false, error_code: 'RECEIPT_REQUEST_MISMATCH', error: `request_id do token ('${payload.request_id}') diverge do esperado ('${expectedRequestId}').` };
+  }
+  if (expectedExecutionId && payload.execution_id !== expectedExecutionId) {
+    return { valid: false, error_code: 'RECEIPT_INVALID', error: `execution_id do token ('${payload.execution_id}') diverge do esperado ('${expectedExecutionId}').` };
+  }
+
+  // 7. Timestamps & TTL validation
   const nowSec = Math.floor(Date.now() / 1000);
 
   // Expired check with clock skew (evaluated first to identify expired tokens)
@@ -434,6 +448,7 @@ export function verifyAgentReceipt(
   expectedOperation?: OptimizationOperation,
   expectedUserId?: string,
   expectedRequestId?: string,
+  expectedExecutionId?: string,
   clockSkewSeconds: number = 60
 ): ReceiptVerificationResult {
   if (!receipt || typeof receipt !== 'object') {
@@ -489,6 +504,9 @@ export function verifyAgentReceipt(
   }
   if (expectedRequestId && receipt.request_id !== expectedRequestId) {
     return { valid: false, error_code: 'RECEIPT_REQUEST_MISMATCH', error: `request_id do recibo ('${receipt.request_id}') diverge do esperado ('${expectedRequestId}').` };
+  }
+  if (expectedExecutionId && receipt.execution_id !== expectedExecutionId) {
+    return { valid: false, error_code: 'RECEIPT_INVALID', error: `execution_id do recibo ('${receipt.execution_id}') diverge do esperado ('${expectedExecutionId}').` };
   }
 
   // Instantiate agent public key

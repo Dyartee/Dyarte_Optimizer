@@ -89,19 +89,18 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Execution Tokens Registry
+    // Execution Tokens Registry (Managed exclusively by Backend Admin SDK)
     match /executions/{executionId} {
       allow get: if isSignedIn() && (resource.data.user_id == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.user_id == request.auth.uid || isAdmin());
       allow write: if isAdmin();
     }
 
-    // Optimization History
+    // Optimization History (Managed exclusively by Backend Admin SDK)
     match /optimization_history/{historyId} {
       allow get: if isSignedIn() && (resource.data.user_id == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.user_id == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && (request.resource.data.user_id == request.auth.uid || isAdmin());
-      allow update, delete: if isAdmin();
+      allow write: if isAdmin();
     }
 
     // Admin Logs

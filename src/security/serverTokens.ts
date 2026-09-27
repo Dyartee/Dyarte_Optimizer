@@ -23,7 +23,7 @@ export interface ExecutionReceiptPayload {
   operation: OptimizationOperation;
   user_id: string;
   device_id: string;
-  status: 'APLICADO' | 'FALHA' | 'REVERTIDO';
+  status: 'APLICADO' | 'FALHA' | 'REVERTIDO' | 'JA_APLICADO';
   verified: boolean;
   before_state?: any;
   after_state?: any;
@@ -55,7 +55,7 @@ const consumedReceiptNonces = new Map<string, NonceEntry>();
  * Purges expired nonces from memory without wiping valid nonces.
  * Section 5: NUNCA utilizar consumedNonces.clear() para liberar espaço.
  */
-function purgeExpiredNonces(map: Map<string, NonceEntry>, nowSec: number): void {
+export function purgeExpiredNonces(map: Map<string, NonceEntry>, nowSec: number): void {
   for (const [nonce, entry] of map.entries()) {
     if (entry.exp < nowSec) {
       map.delete(nonce);
@@ -67,7 +67,7 @@ function purgeExpiredNonces(map: Map<string, NonceEntry>, nowSec: number): void 
  * Validates and records a nonce for replay protection.
  * Returns error code if rejected, or null if accepted.
  */
-function recordNonceConsumption(map: Map<string, NonceEntry>, nonce: string, exp: number, nowSec: number): string | null {
+export function recordNonceConsumption(map: Map<string, NonceEntry>, nonce: string, exp: number, nowSec: number): string | null {
   if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
     return 'NONCE_EMPTY';
   }
@@ -105,7 +105,7 @@ export function getServerSigningPrivateKey(): crypto.KeyObject {
 
   let rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
 
-  // If environment variable is missing or invalid in dev, read from local .env if available
+  // If environment variable is missing or invalid, check local .env without committing secret
   if (!rawKeyHex || rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
     try {
       if (fs.existsSync('.env')) {
@@ -164,8 +164,8 @@ export function getServerPublicKey(): crypto.KeyObject {
 }
 
 /**
- * Validates the server signing configuration on startup.
- * Returns true if valid, false if unconfigured.
+ * Validates the server signing configuration on startup (Fail-Closed).
+ * Returns true if valid, false if unconfigured or invalid.
  */
 export function validateServerSigningConfiguration(): boolean {
   try {
@@ -186,7 +186,7 @@ export function validateServerSigningConfiguration(): boolean {
  * - operation ('APPLY' | 'ROLLBACK')
  * - tool_id
  * - user_id
- * - device_id (Strict: never 'N/D' for authorized execution)
+ * - device_id (Strict: required, never empty, never 'N/D')
  * - nonce (cryptographically secure random)
  * - iat & exp (TTL strictly max 60 seconds)
  */
@@ -198,15 +198,18 @@ export function generateOptimizationExecutionToken(
   operation: OptimizationOperation = 'APPLY',
   executionId?: string
 ): string {
-  if (!toolId || typeof toolId !== 'string') {
+  if (!toolId || typeof toolId !== 'string' || toolId.trim().length === 0) {
     throw new Error('tool_id é obrigatório para geração do token de execução.');
   }
-  if (!userId || typeof userId !== 'string') {
+  if (!userId || typeof userId !== 'string' || userId.trim().length === 0) {
     throw new Error('user_id é obrigatório para geração do token de execução.');
   }
+  // Section 6 & 7: device_id is mandatory and cannot be 'N/D' for authorized execution
+  if (!deviceId || typeof deviceId !== 'string' || deviceId.trim().length === 0 || deviceId.trim() === 'N/D') {
+    throw new Error('device_id é obrigatório e não pode ser N/D para autorização de execução.');
+  }
 
-  const safeDeviceId = (typeof deviceId === 'string' && deviceId.trim()) ? deviceId.trim() : 'N/D';
-
+  const safeDeviceId = deviceId.trim();
   const privateKey = getServerSigningPrivateKey();
   const now = Math.floor(Date.now() / 1000);
   // Standard TTL: 60s, maximum: 60s
@@ -321,13 +324,21 @@ export function verifyOptimizationExecutionToken(
     return { valid: false, error_code: 'TOKEN_USER_MISMATCH', error: `Usuário do token ('${payload.user_id}') diverge do usuário esperado ('${expectedUserId}').` };
   }
 
-  // 5. Device ID matching
-  if (expectedDeviceId && payload.device_id && payload.device_id !== 'N/D' && expectedDeviceId !== 'N/D' && payload.device_id !== expectedDeviceId) {
-    return { valid: false, error_code: 'DEVICE_MISMATCH', error: 'Dispositivo autorizado no token diverge do dispositivo atual.' };
+  // 5. Device ID matching: Must be non-empty, never N/D
+  if (!payload.device_id || payload.device_id === 'N/D' || typeof payload.device_id !== 'string' || payload.device_id.trim() === '') {
+    return { valid: false, error_code: 'DEVICE_NOT_REGISTERED', error: 'Token sem identificador de dispositivo válido.' };
+  }
+  if (expectedDeviceId && payload.device_id !== expectedDeviceId) {
+    return { valid: false, error_code: 'DEVICE_MISMATCH', error: `Dispositivo do token ('${payload.device_id}') diverge do dispositivo esperado ('${expectedDeviceId}').` };
   }
 
   // 6. Timestamps & TTL validation
   const nowSec = Math.floor(Date.now() / 1000);
+
+  // Expired check with clock skew (evaluated first to identify expired tokens)
+  if (payload.exp < (nowSec - clockSkewSeconds) || payload.exp <= nowSec) {
+    return { valid: false, error_code: 'TOKEN_EXPIRED', error: 'Token de execução expirado.' };
+  }
 
   // iat in future beyond clock skew tolerance
   if (payload.iat > (nowSec + clockSkewSeconds)) {
@@ -342,11 +353,6 @@ export function verifyOptimizationExecutionToken(
   // TTL above maximum permitted (60s)
   if ((payload.exp - payload.iat) > 60) {
     return { valid: false, error_code: 'INVALID_TOKEN', error: 'Tempo de vida (TTL) do token superior ao limite máximo de 60 segundos.' };
-  }
-
-  // Expired check with clock skew
-  if (payload.exp < (nowSec - clockSkewSeconds)) {
-    return { valid: false, error_code: 'TOKEN_EXPIRED', error: 'Token de execução expirado.' };
   }
 
   // 7. Nonce validation and Replay Protection
@@ -371,13 +377,28 @@ export function verifyOptimizationExecutionToken(
 }
 
 /**
+ * Recursively canonicalizes object key order for deterministic JSON serialization.
+ */
+function canonicalizeValue(val: any): any {
+  if (val === null || val === undefined) return null;
+  if (typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(canonicalizeValue);
+  const sortedKeys = Object.keys(val).sort();
+  const res: Record<string, any> = {};
+  for (const k of sortedKeys) {
+    res[k] = canonicalizeValue(val[k]);
+  }
+  return res;
+}
+
+/**
  * Deterministic canonical serialization of an execution receipt (Section 17).
  */
 export function serializeCanonicalReceipt(receipt: ExecutionReceiptPayload): string {
   const ordered = {
     agent_version: receipt.agent_version || '1.1.0',
-    after_state: receipt.after_state ?? null,
-    before_state: receipt.before_state ?? null,
+    after_state: canonicalizeValue(receipt.after_state),
+    before_state: canonicalizeValue(receipt.before_state),
     device_id: receipt.device_id,
     duration_ms: typeof receipt.duration_ms === 'number' ? Math.max(0, receipt.duration_ms) : 0,
     execution_id: receipt.execution_id,
@@ -408,6 +429,11 @@ export function verifyAgentReceipt(
   receipt: ExecutionReceiptPayload,
   signatureHexOrB64: string,
   agentPublicKeyHex: string,
+  expectedToolId?: string,
+  expectedDeviceId?: string,
+  expectedOperation?: OptimizationOperation,
+  expectedUserId?: string,
+  expectedRequestId?: string,
   clockSkewSeconds: number = 60
 ): ReceiptVerificationResult {
   if (!receipt || typeof receipt !== 'object') {
@@ -436,6 +462,33 @@ export function verifyAgentReceipt(
 
   if (sigBuf.length !== 64) {
     return { valid: false, error_code: 'RECEIPT_SIGNATURE_INVALID', error: 'Comprimento de assinatura do Agent inválido (esperado 64 bytes).' };
+  }
+
+  // Device ID must not be empty or N/D
+  if (!receipt.device_id || receipt.device_id === 'N/D' || typeof receipt.device_id !== 'string' || receipt.device_id.trim() === '') {
+    return { valid: false, error_code: 'RECEIPT_DEVICE_MISMATCH', error: 'device_id do recibo ausente ou inválido.' };
+  }
+
+  // Protocol version check
+  if (receipt.protocol_version !== 1) {
+    return { valid: false, error_code: 'PROTOCOL_MISMATCH', error: 'Versão de protocolo inválida no recibo.' };
+  }
+
+  // Contextual validations
+  if (expectedToolId && receipt.tool_id !== expectedToolId) {
+    return { valid: false, error_code: 'RECEIPT_TOOL_MISMATCH', error: `Ferramenta do recibo ('${receipt.tool_id}') diverge da esperada ('${expectedToolId}').` };
+  }
+  if (expectedDeviceId && receipt.device_id !== expectedDeviceId) {
+    return { valid: false, error_code: 'RECEIPT_DEVICE_MISMATCH', error: `Dispositivo do recibo ('${receipt.device_id}') diverge do dispositivo esperado ('${expectedDeviceId}').` };
+  }
+  if (expectedOperation && receipt.operation !== expectedOperation) {
+    return { valid: false, error_code: 'RECEIPT_OPERATION_MISMATCH', error: `Operação do recibo ('${receipt.operation}') diverge da esperada ('${expectedOperation}').` };
+  }
+  if (expectedUserId && receipt.user_id !== expectedUserId) {
+    return { valid: false, error_code: 'RECEIPT_USER_MISMATCH', error: `Usuário do recibo ('${receipt.user_id}') diverge do esperado ('${expectedUserId}').` };
+  }
+  if (expectedRequestId && receipt.request_id !== expectedRequestId) {
+    return { valid: false, error_code: 'RECEIPT_REQUEST_MISMATCH', error: `request_id do recibo ('${receipt.request_id}') diverge do esperado ('${expectedRequestId}').` };
   }
 
   // Instantiate agent public key

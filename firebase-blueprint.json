@@ -70,7 +70,8 @@
         "build": { "type": "string" },
         "last_seen": { "type": "string" },
         "is_agent_connected": { "type": "boolean" },
-        "agent_version": { "type": "string" }
+        "agent_version": { "type": "string" },
+        "agent_public_key": { "type": "string" }
       },
       "required": ["device_id", "user_id"]
     },
@@ -88,7 +89,12 @@
         "status": { "type": "string", "enum": ["SUCESSO", "FALHA", "REVERTIDO"] },
         "result": { "type": "string" },
         "duration_ms": { "type": "number" },
-        "details": { "type": "string" }
+        "details": { "type": "string" },
+        "device_id": { "type": "string" },
+        "verified": { "type": "boolean" },
+        "receipt_verified": { "type": "boolean" },
+        "receipt_nonce": { "type": "string" },
+        "agent_signature": { "type": "string" }
       },
       "required": ["history_id", "user_id", "tool_id", "status", "date"]
     },
@@ -118,6 +124,24 @@
         "safety_lock_enabled": { "type": "boolean" }
       },
       "required": ["support_email", "app_version"]
+    },
+    "Execution": {
+      "title": "Execution",
+      "description": "Registry of authorized optimization execution tokens and lifecycle states",
+      "type": "object",
+      "properties": {
+        "execution_id": { "type": "string" },
+        "tool_id": { "type": "string" },
+        "operation": { "type": "string", "enum": ["APPLY", "ROLLBACK"] },
+        "user_id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "issued_at": { "type": "string" },
+        "expires_at": { "type": "string" },
+        "status": { "type": "string", "enum": ["ISSUED", "EXECUTING", "COMPLETED", "FAILED", "REVERTED"] },
+        "completed_at": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["execution_id", "tool_id", "operation", "user_id", "device_id", "status", "issued_at", "expires_at"]
     }
   },
   "firestore": {
@@ -136,6 +160,10 @@
     "/devices/{deviceId}": {
       "schema": "Device",
       "description": "Desktop hardware fingerprints"
+    },
+    "/executions/{executionId}": {
+      "schema": "Execution",
+      "description": "Registry of authorized executions"
     },
     "/optimization_history/{historyId}": {
       "schema": "OptimizationHistory",

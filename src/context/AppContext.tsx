@@ -1736,7 +1736,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Backend Optimization Execution Authorization & History Helpers
   const requestExecutionAuthorization = async (
     toolId: string,
-    deviceId?: string
+    deviceId?: string,
+    operation: 'APPLY' | 'ROLLBACK' = 'APPLY'
   ): Promise<{
     success: boolean;
     authorized: boolean;
@@ -1764,6 +1765,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify({
           tool_id: toolId,
           device_id: deviceId || device.device_id,
+          operation,
         }),
       });
       const data = await res.json();
@@ -1807,6 +1809,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     optimization_id?: string;
     agent_version?: string;
     device_id?: string;
+    receipt?: any;
+    receipt_signature?: string;
+    agent_public_key?: string;
   }): Promise<any> => {
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -1971,6 +1976,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       after_state: result.afterState,
       rollback_available: result.rollbackAvailable,
       device_id: device.device_id,
+      receipt: result.receipt,
+      receipt_signature: result.receiptSignature,
     });
 
     const historyItem: OptimizationHistoryItem = {
@@ -2077,10 +2084,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           after_state: result.afterState,
           rollback_available: result.rollbackAvailable,
           device_id: device.device_id,
+          receipt: result.receipt,
+          receipt_signature: result.receiptSignature,
         });
       }
     } else {
-      result = await optimizationEngine.rollbackTool(toolId, currentUser.nivel_plano);
+      const rollbackAuthRes = await requestExecutionAuthorization(toolId, device.device_id, 'ROLLBACK');
+      if (!rollbackAuthRes.authorized || !rollbackAuthRes.execution_token) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        const errText = rollbackAuthRes.error || 'Autorização de reversão negada pelo servidor central.';
+        addToast('error', 'Autorização Negada', errText);
+        return { success: false, message: errText, active: currentlyActive };
+      }
+
+      result = await optimizationEngine.rollbackTool(toolId, currentUser.nivel_plano, undefined, rollbackAuthRes.execution_token);
+      if (result.success && result.verified) {
+        await recordExecutionResultToBackend({
+          execution_token: rollbackAuthRes.execution_token,
+          tool_id: tool.tool_id,
+          status: 'REVERTIDO',
+          verified: true,
+          duration_ms: 0,
+          result: `Otimização desativada e confirmada pelo Agent: ${getToolName(tool)}.`,
+          details: 'Configuração padrão do Windows restaurada pelo Agent.',
+          before_state: null,
+          after_state: (result as any).restoredState,
+          rollback_available: false,
+          device_id: device.device_id,
+          receipt: (result as any).receipt,
+          receipt_signature: (result as any).receiptSignature,
+        });
+      }
     }
 
     setIsOptimizing(false);

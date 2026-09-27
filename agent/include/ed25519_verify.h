@@ -371,6 +371,102 @@ private:
 
 public:
     /**
+     * Derives a 32-byte Ed25519 public key and 64-byte secret key from a 32-byte seed.
+     * Compatible with RFC 8032 and TweetNaCl crypto_sign_seed_keypair.
+     */
+    static void KeypairFromSeed(uint8_t pk[32], uint8_t sk[64], const uint8_t seed[32]) {
+        static const gf Bx = {
+            -14913, -15377, 9370, 7112, -8233, -19491, 4016, -11281,
+            -24151, -4414, 12690, -11937, 23971, -12745, -7374, -9879
+        };
+        static const gf By = {
+            -23003, 13470, 11786, 257, 15961, -30198, 27894, 10081,
+            24295, 1526, -4226, -13770, 7752, 19875, -20534, 1014
+        };
+
+        uint8_t d[64];
+        gf p[4];
+
+        sha512(d, seed, 32);
+        d[0] &= 248;
+        d[31] &= 127;
+        d[31] |= 64;
+
+        set25519(p[0], Bx);
+        set25519(p[1], By);
+        set25519(p[2], gf0);
+        p[2][0] = 1;
+        M(p[3], Bx, By);
+
+        scalarmult(p, p, d);
+        inv25519(p[2], p[2]);
+        M(p[1], p[1], p[2]);
+        M(p[0], p[0], p[2]);
+        pack25519(pk, p[1]);
+        pk[31] ^= static_cast<uint8_t>(par25519(p[0]) << 7);
+
+        for (int i = 0; i < 32; ++i) sk[i] = seed[i];
+        for (int i = 0; i < 32; ++i) sk[32 + i] = pk[i];
+    }
+
+    /**
+     * Signs message with 64-byte secret key (first 32 bytes seed, last 32 bytes pk).
+     * Output sig is 64 bytes.
+     * Compatible with RFC 8032 and TweetNaCl crypto_sign_detached.
+     */
+    static void Sign(uint8_t sig[64], const uint8_t* msg, size_t msglen, const uint8_t sk[64]) {
+        static const gf Bx = {
+            -14913, -15377, 9370, 7112, -8233, -19491, 4016, -11281,
+            -24151, -4414, 12690, -11937, 23971, -12745, -7374, -9879
+        };
+        static const gf By = {
+            -23003, 13470, 11786, 257, 15961, -30198, 27894, 10081,
+            24295, 1526, -4226, -13770, 7752, 19875, -20534, 1014
+        };
+
+        uint8_t d[64], h[64], r[64];
+        gf p[4];
+        int64_t x[64];
+
+        sha512(d, sk, 32);
+        d[0] &= 248;
+        d[31] &= 127;
+        d[31] |= 64;
+
+        std::vector<uint8_t> sm(64 + msglen);
+        for (size_t i = 0; i < msglen; ++i) sm[64 + i] = msg[i];
+        for (size_t i = 0; i < 32; ++i) sm[32 + i] = d[32 + i];
+        sha512(r, sm.data() + 32, msglen + 32);
+        reduce(r);
+
+        set25519(p[0], Bx);
+        set25519(p[1], By);
+        set25519(p[2], gf0);
+        p[2][0] = 1;
+        M(p[3], Bx, By);
+        scalarmult(p, p, r);
+        inv25519(p[2], p[2]);
+        M(p[1], p[1], p[2]);
+        M(p[0], p[0], p[2]);
+        pack25519(sig, p[1]);
+        sig[31] ^= static_cast<uint8_t>(par25519(p[0]) << 7);
+
+        for (size_t i = 0; i < 32; ++i) sm[i] = sig[i];
+        for (size_t i = 0; i < 32; ++i) sm[32 + i] = sk[32 + i];
+        sha512(h, sm.data(), msglen + 64);
+        reduce(h);
+
+        for (size_t i = 0; i < 64; ++i) x[i] = 0;
+        for (size_t i = 0; i < 32; ++i) x[i] = static_cast<int64_t>(r[i]);
+        for (size_t i = 0; i < 32; ++i) {
+            for (size_t j = 0; j < 32; ++j) {
+                x[i + j] += static_cast<int64_t>(h[i]) * static_cast<int64_t>(d[j]);
+            }
+        }
+        modL(sig + 32, x);
+    }
+
+    /**
      * Verifies a 64-byte Ed25519 signature on message using the 32-byte public key.
      * Returns true if valid, false otherwise.
      */

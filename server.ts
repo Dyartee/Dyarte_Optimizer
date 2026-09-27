@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
+dotenv.config();
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -13,15 +13,21 @@ import {
   validateServerSigningConfiguration,
   generateOptimizationExecutionToken,
   verifyOptimizationExecutionToken,
+  verifyAgentReceipt,
+  serializeCanonicalReceipt,
+  OptimizationOperation,
 } from './src/security/serverTokens';
 
-// Validate Ed25519 signing key on server startup (fails immediately if missing/invalid)
-validateServerSigningConfiguration();
+// Section 6: Fail-closed server startup check. Must refuse startup if signing key is invalid/unconfigured.
+if (!validateServerSigningConfiguration()) {
+  throw new Error('[FATAL_SECURITY] Server signing configuration invalid or OPTIMIZATION_SIGNING_PRIVATE_KEY missing. Server startup aborted.');
+}
 
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+// Section 9: Limit express JSON payload size to prevent DoS attacks
+app.use(express.json({ limit: '64kb' }));
 
 // Initialize Firebase Admin SDK
 let adminApp: AdminApp;
@@ -350,17 +356,62 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
       });
     }
 
-    // Bind to authorized device
-    const targetDeviceId = (typeof device_id === 'string' && device_id.trim()) ? device_id.trim() : (user.device_id || 'N/D');
+    // Section 6: Device Binding - The frontend is NOT an authority for device_id
+    // The backend must discover the authorized device using user.device_id or registered devices in Firestore
+    let targetDeviceId = (typeof user.device_id === 'string' && user.device_id.trim() && user.device_id !== 'N/D')
+      ? user.device_id.trim()
+      : null;
 
-    // Generate cryptographic execution token (Ed25519 signed, 60s TTL, random nonce)
-    const executionToken = generateOptimizationExecutionToken(tool_id, uid, targetDeviceId, 60);
+    if (!targetDeviceId && typeof device_id === 'string' && device_id.trim() && device_id !== 'N/D') {
+      const devDoc = await adminDb.collection('devices').doc(device_id.trim()).get();
+      if (devDoc.exists && devDoc.data()?.user_id === uid) {
+        targetDeviceId = device_id.trim();
+      }
+    }
+
+    if (!targetDeviceId) {
+      const devSnap = await adminDb.collection('devices').where('user_id', '==', uid).limit(1).get();
+      if (!devSnap.empty) {
+        targetDeviceId = devSnap.docs[0].id;
+      }
+    }
+
+    if (!targetDeviceId || targetDeviceId === 'N/D') {
+      return res.status(403).json({
+        success: false,
+        authorized: false,
+        error_code: 'DEVICE_NOT_REGISTERED',
+        error: 'Dispositivo Windows não registrado para esta conta. Conecte o DYARTE Agent ao aplicativo para vincular seu computador.',
+      });
+    }
+
+    const targetOperation: OptimizationOperation = req.body.operation === 'ROLLBACK' ? 'ROLLBACK' : 'APPLY';
+    const executionId = `exec_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+
+    // Section 21: Generate cryptographic execution token bound to executionId (Ed25519 signed, 60s TTL, random nonce, operation bound)
+    const executionToken = generateOptimizationExecutionToken(tool_id, uid, targetDeviceId, 60, targetOperation, executionId);
     const expiresAt = Math.floor(Date.now() / 1000) + 60;
+
+    // Section 20: Execution Registry in Firestore with initial ISSUED state
+    const executionRecord = {
+      execution_id: executionId,
+      tool_id,
+      operation: targetOperation,
+      user_id: uid,
+      device_id: targetDeviceId,
+      issued_at: new Date().toISOString(),
+      expires_at: new Date(expiresAt * 1000).toISOString(),
+      status: 'ISSUED',
+      created_at: new Date().toISOString(),
+    };
+    await adminDb.collection('executions').doc(executionId).set(executionRecord);
 
     res.json({
       success: true,
       authorized: true,
+      execution_id: executionId,
       tool_id,
+      operation: targetOperation,
       execution_token: executionToken,
       expires_at: expiresAt,
       required_plan_level: reqLevel,
@@ -372,7 +423,221 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
   }
 });
 
-// Record Verified Optimization Execution Result in History
+// Section 18 & 19: Complete Execution with Real Agent Signed Receipt Validation
+app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { execution_token, receipt, receipt_signature } = req.body;
+    const uid = req.user!.uid;
+
+    if (!execution_token || typeof execution_token !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'execution_token é obrigatório.',
+        error_code: 'INVALID_TOKEN',
+      });
+    }
+
+    if (!receipt || typeof receipt !== 'object') {
+      return res.status(400).json({
+        success: false,
+        error: 'receipt é obrigatório e deve ser um objeto JSON.',
+        error_code: 'RECEIPT_INVALID',
+      });
+    }
+
+    if (!receipt_signature || typeof receipt_signature !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'receipt_signature é obrigatória.',
+        error_code: 'RECEIPT_SIGNATURE_INVALID',
+      });
+    }
+
+    // 1-7. Validate token cryptographically
+    const tokenVerification = verifyOptimizationExecutionToken(
+      execution_token,
+      receipt.tool_id,
+      receipt.device_id,
+      receipt.operation,
+      uid
+    );
+
+    if (!tokenVerification.valid || !tokenVerification.payload) {
+      return res.status(403).json({
+        success: false,
+        error: tokenVerification.error || 'Token de execução inválido.',
+        error_code: tokenVerification.error_code || 'INVALID_TOKEN',
+      });
+    }
+
+    const tokenPayload = tokenVerification.payload;
+
+    // 8. execution_id correlation
+    if (tokenPayload.execution_id && receipt.execution_id !== tokenPayload.execution_id) {
+      return res.status(400).json({
+        success: false,
+        error: `execution_id do recibo ('${receipt.execution_id}') diverge do token ('${tokenPayload.execution_id}').`,
+        error_code: 'RECEIPT_INVALID',
+      });
+    }
+
+    // 9. request_id validation
+    if (!receipt.request_id || typeof receipt.request_id !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'request_id é obrigatório no recibo.',
+        error_code: 'RECEIPT_REQUEST_MISMATCH',
+      });
+    }
+
+    // 10 & 11. Resolve Agent Ed25519 public key
+    let agentPubKey: string | null = null;
+    const deviceId = tokenPayload.device_id;
+    if (deviceId && deviceId !== 'N/D') {
+      const devDoc = await adminDb.collection('devices').doc(deviceId).get();
+      if (devDoc.exists && devDoc.data()?.agent_public_key) {
+        agentPubKey = devDoc.data()!.agent_public_key;
+      }
+    }
+    if (!agentPubKey && req.userDoc?.agent_public_key) {
+      agentPubKey = req.userDoc.agent_public_key;
+    }
+
+    if (!agentPubKey) {
+      return res.status(403).json({
+        success: false,
+        error: 'Chave pública do Agent não registrada no servidor.',
+        error_code: 'DEVICE_NOT_REGISTERED',
+      });
+    }
+
+    // 12-19. Verify Agent Ed25519 Signature over Canonical Receipt
+    const receiptVerification = verifyAgentReceipt(
+      receipt,
+      receipt_signature,
+      agentPubKey,
+      tokenPayload.tool_id,
+      tokenPayload.device_id,
+      tokenPayload.operation,
+      uid,
+      receipt.request_id
+    );
+
+    if (!receiptVerification.valid) {
+      return res.status(403).json({
+        success: false,
+        error: receiptVerification.error || 'Assinatura criptográfica do recibo inválida.',
+        error_code: receiptVerification.error_code || 'RECEIPT_SIGNATURE_INVALID',
+      });
+    }
+
+    // 20 & 21. Check authorized execution registry in Firestore
+    const execId = tokenPayload.execution_id || receipt.execution_id;
+    const execRef = adminDb.collection('executions').doc(execId);
+    const execSnap = await execRef.get();
+
+    if (!execSnap.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Registro de execução não encontrado no servidor.',
+        error_code: 'EXECUTION_NOT_FOUND',
+      });
+    }
+
+    const execData = execSnap.data()!;
+    if (execData.status === 'COMPLETED' || execData.status === 'FAILED' || execData.status === 'REVERTED') {
+      return res.status(409).json({
+        success: false,
+        error: `Esta execução já foi finalizada com status: ${execData.status}. Replay rejeitado.`,
+        error_code: 'EXECUTION_ALREADY_COMPLETED',
+      });
+    }
+
+    // Determine final status from validated receipt
+    let finalExecStatus: 'COMPLETED' | 'FAILED' | 'REVERTED' = 'FAILED';
+    let historyStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
+
+    if (receipt.verified && receipt.status === 'APLICADO') {
+      finalExecStatus = 'COMPLETED';
+      historyStatus = 'SUCESSO';
+    } else if (receipt.verified && receipt.status === 'REVERTIDO') {
+      finalExecStatus = 'REVERTED';
+      historyStatus = 'REVERTIDO';
+    } else if (receipt.status === 'JA_APLICADO') {
+      finalExecStatus = 'COMPLETED';
+      historyStatus = 'SUCESSO';
+    } else {
+      finalExecStatus = 'FAILED';
+      historyStatus = 'FALHA';
+    }
+
+    // Update execution registry document
+    await execRef.update({
+      status: finalExecStatus,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Number(receipt.duration_ms) || 0),
+      verified: Boolean(receipt.verified),
+      receipt,
+      receipt_signature,
+    });
+
+    // Record official history
+    const canonicalTool = CANONICAL_TOOLS[receipt.tool_id];
+    const toolName = canonicalTool?.nome || receipt.tool_id;
+    const category = canonicalTool?.categoria || 'SISTEMA';
+    const historyId = `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+    const historyRecord = {
+      history_id: historyId,
+      execution_id: execId,
+      optimization_id: `opt_${execId}`,
+      request_id: receipt.request_id,
+      user_id: uid,
+      device_id: tokenPayload.device_id,
+      tool_id: receipt.tool_id,
+      tool_name: toolName,
+      category,
+      date: new Date().toISOString(),
+      status: historyStatus,
+      result: historyStatus === 'SUCESSO'
+        ? `Otimização ${toolName} aplicada e confirmada pelo Windows Agent.`
+        : historyStatus === 'REVERTIDO'
+        ? `Otimização ${toolName} revertida e confirmada pelo Windows Agent.`
+        : 'Operação reportou falha ou não foi verificada pelo Agent.',
+      details: receipt.after_state
+        ? `Estado validado: ${JSON.stringify(receipt.after_state)}`
+        : 'Execução auditada no Windows Agent.',
+      before_state: receipt.before_state || null,
+      after_state: receipt.after_state || null,
+      duration_ms: Math.max(0, Number(receipt.duration_ms) || 0),
+      agent_version: receipt.agent_version || '1.1.0',
+      rollback_available: Boolean(receipt.rollback_available),
+      verified: Boolean(receipt.verified),
+      receipt_verified: true,
+      receipt_nonce: receipt.receipt_nonce,
+      agent_signature: receipt_signature,
+    };
+
+    await adminDb.collection('optimization_history').doc(historyId).set(historyRecord);
+
+    res.json({
+      success: true,
+      verified: receipt.verified,
+      execution_id: execId,
+      status: finalExecStatus,
+      record: historyRecord,
+    });
+  } catch (err: any) {
+    console.error('Erro ao finalizar execução no servidor:', err);
+    res.status(500).json({
+      success: false,
+      error: 'Erro interno ao processar recibo de execução.',
+      details: err?.message || err,
+    });
+  }
+});
+
+// Record Verified Optimization Execution Result in History (Legacy & Direct Integration Support)
 app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
@@ -391,6 +656,9 @@ app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedReque
       rollback_available,
       error,
       details,
+      receipt,
+      receipt_signature,
+      agent_public_key,
     } = req.body;
 
     const uid = req.user!.uid;
@@ -422,6 +690,54 @@ app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedReque
       });
     }
 
+    const targetDeviceId = device_id || tokenVerification.payload.device_id || 'N/D';
+
+    // Resolve Agent Ed25519 public key
+    let resolvedAgentPubKey: string | null = null;
+    if (typeof agent_public_key === 'string' && /^[0-9a-fA-F]{64}$/.test(agent_public_key.trim())) {
+      resolvedAgentPubKey = agent_public_key.trim().toLowerCase();
+    } else if (targetDeviceId && targetDeviceId !== 'N/D') {
+      const devDoc = await adminDb.collection('devices').doc(targetDeviceId).get();
+      if (devDoc.exists && devDoc.data()?.agent_public_key) {
+        resolvedAgentPubKey = devDoc.data()!.agent_public_key;
+      }
+    }
+    if (!resolvedAgentPubKey && req.userDoc?.agent_public_key) {
+      resolvedAgentPubKey = req.userDoc.agent_public_key;
+    }
+
+    // Validate Agent Receipt cryptographic signature if receipt is provided
+    let isReceiptCryptographicallyVerified = false;
+    if (receipt && receipt_signature) {
+      if (!resolvedAgentPubKey) {
+        return res.status(403).json({
+          error: 'Chave pública do Agent não registrada no servidor para validação do recibo.',
+          error_code: 'DEVICE_NOT_REGISTERED',
+        });
+      }
+
+      const receiptVerification = verifyAgentReceipt(
+        receipt,
+        receipt_signature,
+        resolvedAgentPubKey,
+        tool_id,
+        targetDeviceId,
+        tokenVerification.payload.operation,
+        uid,
+        request_id
+      );
+
+      if (!receiptVerification.valid) {
+        console.warn(`[Security] [Receipt] Recibo rejeitado: ${receiptVerification.error} (${receiptVerification.error_code})`);
+        return res.status(403).json({
+          error: `Recibo rejeitado por assinatura inválida do Agent: ${receiptVerification.error}`,
+          error_code: receiptVerification.error_code || 'RECEIPT_SIGNATURE_INVALID',
+        });
+      }
+
+      isReceiptCryptographicallyVerified = true;
+    }
+
     const canonicalTool = CANONICAL_TOOLS[tool_id];
     const toolName = canonicalTool?.nome || tool_id;
     const category = canonicalTool?.categoria || 'SISTEMA';
@@ -443,7 +759,7 @@ app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedReque
     const record = {
       history_id: historyId,
       user_id: uid,
-      device_id: device_id || tokenVerification.payload.device_id || 'N/D',
+      device_id: targetDeviceId,
       tool_id,
       tool_name: toolName,
       category,
@@ -458,6 +774,9 @@ app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedReque
       error: error || null,
       rollback_available: Boolean(rollback_available),
       verified: Boolean(verified),
+      receipt_verified: isReceiptCryptographicallyVerified,
+      receipt_nonce: receipt?.receipt_nonce || null,
+      agent_signature: receipt_signature || null,
       request_id: request_id || null,
       optimization_id: optimization_id || null,
     };
@@ -485,10 +804,14 @@ app.post('/api/device/sync', requireAuth, async (req: AuthenticatedRequest, res:
     }
 
     const deviceId = rawDeviceId.substring(0, 64);
+    const agentPubKey = (typeof rawData.agent_public_key === 'string' && /^[0-9a-fA-F]{64}$/.test(rawData.agent_public_key.trim()))
+      ? rawData.agent_public_key.trim().toLowerCase()
+      : null;
 
     const sanitizedDevice = {
       device_id: deviceId,
       user_id: uid,
+      agent_public_key: agentPubKey,
       cpu: typeof rawData.cpu === 'string' && rawData.cpu.trim() ? rawData.cpu.substring(0, 100) : 'N/D',
       gpu: typeof rawData.gpu === 'string' && rawData.gpu.trim() ? rawData.gpu.substring(0, 100) : 'N/D',
       ram: typeof rawData.ram === 'string' && rawData.ram.trim() ? rawData.ram.substring(0, 50) : 'N/D',
@@ -505,11 +828,269 @@ app.post('/api/device/sync', requireAuth, async (req: AuthenticatedRequest, res:
     };
 
     await adminDb.collection('devices').doc(deviceId).set(sanitizedDevice, { merge: true });
-    await adminDb.collection('users').doc(uid).update({ device_id: deviceId });
+    await adminDb.collection('users').doc(uid).update({
+      device_id: deviceId,
+      ...(agentPubKey ? { agent_public_key: agentPubKey } : {}),
+    });
 
     res.json({ success: true, device: sanitizedDevice });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao sincronizar informações do dispositivo Windows.' });
+  }
+});
+
+// Section 7: Agent Pairing Endpoint
+app.post('/api/agent/pair', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { device_id, agent_public_key, agent_version, cpu, gpu, ram, windows, windows_version } = req.body;
+    const uid = req.user!.uid;
+
+    if (!device_id || typeof device_id !== 'string' || device_id.trim() === '' || device_id === 'N/D') {
+      return res.status(400).json({ error: 'device_id é obrigatório para pairing do Agent.', error_code: 'DEVICE_NOT_REGISTERED' });
+    }
+
+    if (!agent_public_key || typeof agent_public_key !== 'string' || !/^[0-9a-fA-F]{64}$/.test(agent_public_key.trim())) {
+      return res.status(400).json({ error: 'agent_public_key deve ser uma chave Ed25519 de 64 caracteres hexadecimais.', error_code: 'INVALID_TOKEN' });
+    }
+
+    const safeDeviceId = device_id.trim();
+    const safePubKey = agent_public_key.trim().toLowerCase();
+
+    const deviceData = {
+      device_id: safeDeviceId,
+      user_id: uid,
+      agent_public_key: safePubKey,
+      agent_version: typeof agent_version === 'string' ? agent_version.trim() : '1.1.0',
+      cpu: cpu || 'N/D',
+      gpu: gpu || 'N/D',
+      ram: ram || 'N/D',
+      windows: windows || 'N/D',
+      windows_version: windows_version || 'N/D',
+      is_agent_connected: true,
+      last_seen: new Date().toISOString(),
+      paired_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await adminDb.collection('devices').doc(safeDeviceId).set(deviceData, { merge: true });
+    await adminDb.collection('users').doc(uid).update({
+      device_id: safeDeviceId,
+      agent_public_key: safePubKey,
+    });
+
+    res.json({ success: true, paired: true, device_id: safeDeviceId, agent_public_key: safePubKey });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Erro ao emparelhar Windows Agent.', details: err?.message || err });
+  }
+});
+
+// Challenges store in memory for mutual authentication
+const agentChallenges = new Map<string, { challenge: string; exp: number }>();
+
+// Section 8: Challenge Generation
+app.post('/api/agent/challenge', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { device_id } = req.body;
+    const targetDeviceId = device_id || req.userDoc?.device_id;
+    if (!targetDeviceId || targetDeviceId === 'N/D') {
+      return res.status(400).json({ error: 'device_id é obrigatório para emitir challenge.', error_code: 'DEVICE_NOT_REGISTERED' });
+    }
+
+    const challengeHex = crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+    const expiresAt = now + 60000;
+
+    agentChallenges.set(targetDeviceId, { challenge: challengeHex, exp: expiresAt });
+
+    res.json({
+      success: true,
+      device_id: targetDeviceId,
+      challenge: challengeHex,
+      expires_at: expiresAt,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Erro ao emitir challenge para o Agent.' });
+  }
+});
+
+// Section 8: Challenge Verification
+app.post('/api/agent/verify-challenge', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { device_id, challenge, response_signature } = req.body;
+
+    if (!device_id || !challenge || !response_signature) {
+      return res.status(400).json({ error: 'device_id, challenge e response_signature são obrigatórios.', error_code: 'REQUEST_INVALID' });
+    }
+
+    const stored = agentChallenges.get(device_id);
+    if (!stored || stored.challenge !== challenge || stored.exp < Date.now()) {
+      return res.status(403).json({ error: 'Challenge inválido ou expirado.', error_code: 'INVALID_TOKEN' });
+    }
+
+    const devDoc = await adminDb.collection('devices').doc(device_id).get();
+    const pubKeyHex = devDoc.data()?.agent_public_key || req.userDoc?.agent_public_key;
+
+    if (!pubKeyHex || !/^[0-9a-fA-F]{64}$/.test(pubKeyHex)) {
+      return res.status(403).json({ error: 'Chave pública do Agent não registrada.', error_code: 'DEVICE_NOT_REGISTERED' });
+    }
+
+    let sigBuf: Buffer;
+    if (/^[0-9a-fA-F]{128}$/.test(response_signature)) {
+      sigBuf = Buffer.from(response_signature, 'hex');
+    } else {
+      sigBuf = Buffer.from(response_signature, 'base64url');
+    }
+
+    const SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
+    const agentPubKeyObj = crypto.createPublicKey({
+      key: Buffer.concat([SPKI_HEADER, Buffer.from(pubKeyHex, 'hex')]),
+      format: 'der',
+      type: 'spki',
+    });
+
+    const ok = crypto.verify(null, Buffer.from(challenge, 'utf8'), agentPubKeyObj, sigBuf);
+    if (!ok) {
+      return res.status(403).json({ error: 'Assinatura do challenge rejeitada.', error_code: 'TOKEN_SIGNATURE_INVALID' });
+    }
+
+    agentChallenges.delete(device_id);
+    res.json({ success: true, authenticated: true, device_id });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Erro ao verificar challenge do Agent.', details: err?.message || err });
+  }
+});
+
+// Section 31: Dedicated Admin Authority Endpoints
+app.post('/api/admin/licenses/create', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { user_id, plan_id, expires_in_days } = req.body;
+    const newLicenseId = `lic_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const days = Math.max(1, Number(expires_in_days) || 30);
+    const newLicense = {
+      license_id: newLicenseId,
+      user_id: user_id || 'unassigned',
+      plan_id: plan_id || 'medio',
+      status: 'ATIVA',
+      created_at: new Date().toISOString(),
+      activated_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      device_id: 'PENDING',
+      last_seen: new Date().toISOString(),
+      app_version: '2.4.0',
+    };
+    await adminDb.collection('licenses').doc(newLicenseId).set(newLicense);
+    await recordAdminLog('CREATE_LICENSE', req.user!.email || 'admin', newLicenseId, `Criada licença ${newLicenseId}`);
+    res.json({ success: true, license: newLicense });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao criar licença.' });
+  }
+});
+
+app.post('/api/admin/licenses/revoke', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { license_id } = req.body;
+    if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
+    await adminDb.collection('licenses').doc(license_id).update({ status: 'CANCELADA' });
+    await recordAdminLog('REVOKE_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} cancelada`);
+    res.json({ success: true, license_id, status: 'CANCELADA' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao revogar licença.' });
+  }
+});
+
+app.post('/api/admin/licenses/suspend', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { license_id } = req.body;
+    if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
+    await adminDb.collection('licenses').doc(license_id).update({ status: 'SUSPENSA' });
+    await recordAdminLog('SUSPEND_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} suspensa`);
+    res.json({ success: true, license_id, status: 'SUSPENSA' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao suspender licença.' });
+  }
+});
+
+app.post('/api/admin/licenses/reactivate', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { license_id } = req.body;
+    if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
+    await adminDb.collection('licenses').doc(license_id).update({ status: 'ATIVA' });
+    await recordAdminLog('REACTIVATE_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} reativada`);
+    res.json({ success: true, license_id, status: 'ATIVA' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao reativar licença.' });
+  }
+});
+
+app.post('/api/admin/licenses/update-expiry', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { license_id, expires_at } = req.body;
+    if (!license_id || !expires_at) return res.status(400).json({ error: 'license_id e expires_at são obrigatórios.' });
+    await adminDb.collection('licenses').doc(license_id).update({ expires_at });
+    await recordAdminLog('UPDATE_LICENSE_EXPIRY', req.user!.email || 'admin', license_id, `Expiração alterada para ${expires_at}`);
+    res.json({ success: true, license_id, expires_at });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar data de expiração da licença.' });
+  }
+});
+
+app.post('/api/admin/plans/update-price', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { plan_id, price } = req.body;
+    if (!plan_id || typeof price !== 'number') return res.status(400).json({ error: 'plan_id e price são obrigatórios.' });
+    await adminDb.collection('config').doc('plans').set({ [plan_id]: { price } }, { merge: true });
+    await recordAdminLog('UPDATE_PLAN_PRICE', req.user!.email || 'admin', plan_id, `Preço do plano ${plan_id} alterado para R$${price}`);
+    res.json({ success: true, plan_id, price });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar preço do plano.' });
+  }
+});
+
+app.post('/api/admin/plans/update-features', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { plan_id, features } = req.body;
+    if (!plan_id || !Array.isArray(features)) return res.status(400).json({ error: 'plan_id e features são obrigatórios.' });
+    await adminDb.collection('config').doc('plans').set({ [plan_id]: { features } }, { merge: true });
+    await recordAdminLog('UPDATE_PLAN_FEATURES', req.user!.email || 'admin', plan_id, `Recursos do plano ${plan_id} atualizados`);
+    res.json({ success: true, plan_id, features });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar recursos do plano.' });
+  }
+});
+
+app.post('/api/admin/plans/toggle-status', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { plan_id, active } = req.body;
+    if (!plan_id) return res.status(400).json({ error: 'plan_id é obrigatório.' });
+    await adminDb.collection('config').doc('plans').set({ [plan_id]: { active: Boolean(active) } }, { merge: true });
+    await recordAdminLog('TOGGLE_PLAN_STATUS', req.user!.email || 'admin', plan_id, `Status do plano ${plan_id} alterado para ${active ? 'ATIVO' : 'INATIVO'}`);
+    res.json({ success: true, plan_id, active: Boolean(active) });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao alternar status do plano.' });
+  }
+});
+
+app.post('/api/admin/tools/update', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { tool_id, updates } = req.body;
+    if (!tool_id || !updates || typeof updates !== 'object') return res.status(400).json({ error: 'tool_id e updates são obrigatórios.' });
+    await adminDb.collection('config').doc('tools').set({ [tool_id]: updates }, { merge: true });
+    await recordAdminLog('UPDATE_TOOL', req.user!.email || 'admin', tool_id, `Ferramenta ${tool_id} atualizada`);
+    res.json({ success: true, tool_id, updates });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar ferramenta.' });
+  }
+});
+
+app.post('/api/admin/tools/add', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { tool } = req.body;
+    if (!tool || !tool.tool_id) return res.status(400).json({ error: 'tool com tool_id é obrigatório.' });
+    await adminDb.collection('config').doc('tools').set({ [tool.tool_id]: tool }, { merge: true });
+    await recordAdminLog('ADD_TOOL', req.user!.email || 'admin', tool.tool_id, `Ferramenta ${tool.tool_id} adicionada ao catálogo customizado`);
+    res.json({ success: true, tool });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao adicionar ferramenta.' });
   }
 });
 

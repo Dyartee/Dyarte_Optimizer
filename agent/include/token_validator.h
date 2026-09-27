@@ -231,8 +231,13 @@ public:
             return res;
         }
 
-        // 6. Validate device_id matching if localDeviceId is present
-        if (!localDeviceId.empty() && !res.deviceId.empty() && res.deviceId != "N/D" && localDeviceId != "N/D") {
+        // 6. Validate device_id: must be non-empty, never N/D, and match local device if known
+        if (res.deviceId.empty() || res.deviceId == "N/D") {
+            res.errorCode = "DEVICE_NOT_REGISTERED";
+            res.error = "Token sem identificador de dispositivo valido.";
+            return res;
+        }
+        if (!localDeviceId.empty() && localDeviceId != "N/D") {
             if (res.deviceId != localDeviceId) {
                 res.errorCode = "DEVICE_MISMATCH";
                 res.error = "Dispositivo do token ('" + res.deviceId + "') nao corresponde ao identificador do Agent ('" + localDeviceId + "').";
@@ -244,6 +249,13 @@ public:
         auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
+
+        // Expired check with 15-second clock skew grace period (evaluated first for expired tokens)
+        if (res.exp < (nowSec - 15) || res.exp <= nowSec) {
+            res.errorCode = "TOKEN_EXPIRED";
+            res.error = "Token de autorizacao expirado no servidor.";
+            return res;
+        }
 
         // iat in future beyond 15s clock skew
         if (res.iat > (nowSec + 15)) {
@@ -263,13 +275,6 @@ public:
         if ((res.exp - res.iat) > 60) {
             res.errorCode = "INVALID_TOKEN";
             res.error = "TTL do token superior ao limite maximo de 60 segundos.";
-            return res;
-        }
-
-        // Expired check with 15-second clock skew grace period
-        if (res.exp < (nowSec - 15)) {
-            res.errorCode = "TOKEN_EXPIRED";
-            res.error = "Token de autorizacao expirado no servidor.";
             return res;
         }
 

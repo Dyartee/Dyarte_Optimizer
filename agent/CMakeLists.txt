@@ -21,6 +21,9 @@ set(HEADERS
     include/protocol.h
     include/sha1_base64.h
     include/websocket_server.h
+    include/ed25519_verify.h
+    include/agent_identity.h
+    include/token_validator.h
 )
 
 # Executable target

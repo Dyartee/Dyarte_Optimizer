@@ -373,6 +373,63 @@ class AgentBridgeService {
   }
 
   /**
+   * Consulta o inventário completo e real de hardware detectado pelo Windows Agent nativo.
+   * WMI / Win32 / CIM / SetupAPI / DXGI / Registry / PowerCfg
+   */
+  public async getHardwareInventory(timeoutMs = 8000): Promise<{
+    success: boolean;
+    inventory?: any;
+    error?: string;
+  }> {
+    if (this.connectionState !== 'AGENT_ONLINE' || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return {
+        success: false,
+        error: 'Agente offline. Conecte o dyarte-agent.exe no Windows (127.0.0.1:49152).',
+      };
+    }
+
+    const requestId = generateRequestId('hwinv');
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        resolve({
+          success: false,
+          error: 'Tempo limite esgotado aguardando HARDWARE_INVENTORY_RESULT do agente.',
+        });
+      }, timeoutMs);
+
+      this.pendingRequests.set(requestId, {
+        resolve: (resp) => {
+          clearTimeout(timer);
+          if (resp.type === 'HARDWARE_INVENTORY_RESULT') {
+            resolve({
+              success: true,
+              inventory: resp.inventory,
+            });
+          } else {
+            resolve({
+              success: false,
+              error: resp.error || 'Resposta inesperada do agente.',
+            });
+          }
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          resolve({ success: false, error: err.message });
+        },
+        timer,
+      });
+
+      this.sendMessage({
+        protocol_version: this.PROTOCOL_VERSION,
+        request_id: requestId,
+        type: 'GET_HARDWARE_INVENTORY',
+      });
+    });
+  }
+
+  /**
    * Solicita snapshot de telemetria em tempo real ao Windows Agent
    */
   public async requestTelemetry(timeoutMs = 4000): Promise<TelemetrySnapshot | null> {
@@ -525,17 +582,20 @@ class AgentBridgeService {
 
   /**
    * Solicita aplicação de otimização por ID
+   * Requirement 2: AgentBridge envia EXATAMENTE o request_id emitido pelo backend.
    */
   public async applyOptimization(
     toolId: string,
-    executionToken: string
+    executionToken: string,
+    backendRequestId: string
   ): Promise<AgentOptimizationResponse> {
-    return this.requestApplyOptimization(toolId, executionToken);
+    return this.requestApplyOptimization(toolId, executionToken, backendRequestId);
   }
 
   public async requestApplyOptimization(
     toolId: string,
     executionToken: string,
+    backendRequestId: string,
     timeoutMs = 10000
   ): Promise<AgentOptimizationResponse> {
     if (this.connectionState !== 'AGENT_ONLINE') {
@@ -558,7 +618,17 @@ class AgentBridgeService {
       };
     }
 
-    const requestId = generateRequestId('opt');
+    if (!backendRequestId || typeof backendRequestId !== 'string' || backendRequestId.trim() === '') {
+      return {
+        success: false,
+        state: 'FALHA',
+        verified: false,
+        error_code: 'REQUEST_ID_MISSING',
+        error: 'request_id emitido pelo backend é obrigatório. Nunca gerar request_id no AgentBridge.',
+      };
+    }
+
+    const requestId = backendRequestId.trim();
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -632,18 +702,21 @@ class AgentBridgeService {
   }
 
   /**
-   * Solicita rollback específico com token de autorização
+   * Solicita rollback específico com token de autorização e request_id emitido pelo backend
+   * Requirement 2: O backend deve gerar o request_id. Nunca gerar request_id da execução no AgentBridge.
    */
   public async rollbackOptimization(
     toolId: string,
-    executionToken?: string
+    executionToken: string,
+    backendRequestId: string
   ): Promise<AgentOptimizationResponse> {
-    return this.requestRollbackOptimization(toolId, executionToken);
+    return this.requestRollbackOptimization(toolId, executionToken, backendRequestId);
   }
 
   public async requestRollbackOptimization(
     toolId: string,
-    executionToken?: string,
+    executionToken: string,
+    backendRequestId: string,
     timeoutMs = 8000
   ): Promise<AgentOptimizationResponse> {
     if (this.connectionState !== 'AGENT_ONLINE') {
@@ -660,7 +733,17 @@ class AgentBridgeService {
       };
     }
 
-    const requestId = generateRequestId('rbk');
+    if (!backendRequestId || typeof backendRequestId !== 'string' || backendRequestId.trim() === '') {
+      return {
+        success: false,
+        state: 'FALHA',
+        verified: false,
+        error: 'request_id emitido pelo backend é obrigatório para rollback. Nunca gerar request_id no AgentBridge.',
+        error_code: 'REQUEST_ID_MISSING',
+      };
+    }
+
+    const requestId = backendRequestId.trim();
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {

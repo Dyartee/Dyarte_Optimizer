@@ -152,6 +152,7 @@ async function runSecurityTestSuite() {
   const emptyNonceToken = craftAndSignToken({
     protocol_version: 1,
     execution_id: 'exec_test_empty_nonce',
+    request_id: 'req_test_empty_nonce',
     operation: 'APPLY',
     tool_id: toolId,
     user_id: userId,
@@ -257,7 +258,7 @@ async function runSecurityTestSuite() {
 
   // TEST 15: Agent Offline -> FALHA (AGENT_OFFLINE)
   agentBridge.disconnect();
-  const res15 = await agentBridge.requestApplyOptimization('tool_perf_power_plan', validToken);
+  const res15 = await agentBridge.requestApplyOptimization('tool_perf_power_plan', validToken, 'req_test_15');
   assert(
     !res15.success && res15.error_code === 'AGENT_OFFLINE',
     'TEST 15 (Agent Offline)',
@@ -265,7 +266,7 @@ async function runSecurityTestSuite() {
   );
 
   // TEST 16: Rollback sem token -> REJEITA (INVALID_TOKEN)
-  const res16 = await agentBridge.requestRollbackOptimization(toolId, undefined);
+  const res16 = await agentBridge.requestRollbackOptimization(toolId, '' as any, 'req_test_16');
   assert(
     !res16.success && (res16.error_code === 'INVALID_TOKEN' || res16.error_code === 'AGENT_OFFLINE'),
     'TEST 16 (Rollback Sem Token)',

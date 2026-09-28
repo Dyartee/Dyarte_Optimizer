@@ -40,7 +40,7 @@ if %errorlevel% equ 0 (
     cl.exe /nologo /W3 /EHsc /std:c++17 /O2 /DNDEBUG /DWIN32 /D_WINDOWS ^
         /I include ^
         src\main.cpp src\websocket_server.cpp ^
-        ws2_32.lib crypt32.lib ^
+        ws2_32.lib crypt32.lib bcrypt.lib wbemuuid.lib ^
         /Fe:build\Release\dyarte-agent.exe ^
         /Fo:build\Release\
 

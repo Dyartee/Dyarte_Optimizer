@@ -387,31 +387,46 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
 
     const targetOperation: OptimizationOperation = req.body.operation === 'ROLLBACK' ? 'ROLLBACK' : 'APPLY';
     const executionId = `exec_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-
-    // Section 21: Generate cryptographic execution token bound to executionId (Ed25519 signed, 60s TTL, random nonce, operation bound)
-    const executionToken = generateOptimizationExecutionToken(tool_id, uid, targetDeviceId, 60, targetOperation, executionId);
+    const requestId = `req_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     const expiresAt = Math.floor(Date.now() / 1000) + 60;
 
-    // Section 20: Execution Registry in Firestore with initial ISSUED state
+    // Requirement 2: O backend deve salvar request_id ANTES de entregar o token.
     const executionRecord = {
       execution_id: executionId,
+      request_id: requestId,
       tool_id,
       operation: targetOperation,
       user_id: uid,
       device_id: targetDeviceId,
+      status: 'ISSUED',
       issued_at: new Date().toISOString(),
       expires_at: new Date(expiresAt * 1000).toISOString(),
-      status: 'ISSUED',
+      started_at: null,
+      completed_at: null,
       created_at: new Date().toISOString(),
     };
     await adminDb.collection('executions').doc(executionId).set(executionRecord);
+
+    // Requirement 2: Token contains protocol_version, execution_id, request_id, operation, tool_id, user_id, device_id, nonce, iat, exp
+    const executionToken = generateOptimizationExecutionToken(
+      tool_id,
+      uid,
+      targetDeviceId,
+      60,
+      targetOperation,
+      executionId,
+      requestId
+    );
 
     res.json({
       success: true,
       authorized: true,
       execution_id: executionId,
+      request_id: requestId,
       tool_id,
       operation: targetOperation,
+      user_id: uid,
+      device_id: targetDeviceId,
       execution_token: executionToken,
       expires_at: expiresAt,
       required_plan_level: reqLevel,
@@ -423,7 +438,66 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
   }
 });
 
-// Section 18 & 19: Complete Execution with Real Agent Signed Receipt Validation
+// Requirement 3: Transition execution state from ISSUED to EXECUTING
+app.post('/api/executions/start', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { execution_id, request_id } = req.body;
+    const uid = req.user!.uid;
+
+    if (!execution_id || typeof execution_id !== 'string') {
+      return res.status(400).json({ success: false, error_code: 'INVALID_REQUEST', error: 'execution_id é obrigatório.' });
+    }
+    if (!request_id || typeof request_id !== 'string') {
+      return res.status(400).json({ success: false, error_code: 'INVALID_REQUEST', error: 'request_id é obrigatório.' });
+    }
+
+    const execRef = adminDb.collection('executions').doc(execution_id);
+
+    const result = await adminDb.runTransaction(async (transaction) => {
+      const snap = await transaction.get(execRef);
+      if (!snap.exists) {
+        throw new Error('EXECUTION_NOT_FOUND');
+      }
+      const data = snap.data()!;
+      if (data.user_id !== uid && req.userDoc?.role !== 'ADMIN') {
+        throw new Error('TOKEN_USER_MISMATCH');
+      }
+      if (data.request_id !== request_id) {
+        throw new Error('REQUEST_ID_MISMATCH');
+      }
+      if (data.status !== 'ISSUED') {
+        throw new Error(`INVALID_STATUS_TRANSITION_${data.status}`);
+      }
+
+      const startedAt = new Date().toISOString();
+      transaction.update(execRef, {
+        status: 'EXECUTING',
+        started_at: startedAt,
+      });
+      return { execution_id, request_id, status: 'EXECUTING', started_at: startedAt };
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    const msg = error?.message || '';
+    if (msg === 'EXECUTION_NOT_FOUND') {
+      return res.status(404).json({ success: false, error_code: 'EXECUTION_NOT_FOUND', error: 'Registro de execução não encontrado no servidor.' });
+    }
+    if (msg === 'TOKEN_USER_MISMATCH') {
+      return res.status(403).json({ success: false, error_code: 'TOKEN_USER_MISMATCH', error: 'Usuário não autorizado para esta execução.' });
+    }
+    if (msg === 'REQUEST_ID_MISMATCH') {
+      return res.status(400).json({ success: false, error_code: 'RECEIPT_REQUEST_MISMATCH', error: 'request_id diverge do registrado.' });
+    }
+    if (msg.startsWith('INVALID_STATUS_TRANSITION_')) {
+      const curStatus = msg.replace('INVALID_STATUS_TRANSITION_', '');
+      return res.status(409).json({ success: false, error_code: 'INVALID_STATE_TRANSITION', error: `Execução não está em status ISSUED (status atual: ${curStatus}).` });
+    }
+    res.status(500).json({ success: false, error: 'Erro ao transicionar execução para EXECUTING.' });
+  }
+});
+
+// Requirements 1, 2, 3: Complete Execution with Real Agent Signed Receipt Validation & Atomic Firestore Transaction
 app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { execution_token, receipt, receipt_signature } = req.body;
@@ -459,7 +533,9 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       receipt.tool_id,
       receipt.device_id,
       receipt.operation,
-      uid
+      uid,
+      receipt.request_id,
+      receipt.execution_id
     );
 
     if (!tokenVerification.valid || !tokenVerification.payload) {
@@ -472,8 +548,8 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
 
     const tokenPayload = tokenVerification.payload;
 
-    // 8. execution_id correlation
-    if (tokenPayload.execution_id && receipt.execution_id !== tokenPayload.execution_id) {
+    // Requirement 2: Strict correlation check
+    if (receipt.execution_id !== tokenPayload.execution_id) {
       return res.status(400).json({
         success: false,
         error: `execution_id do recibo ('${receipt.execution_id}') diverge do token ('${tokenPayload.execution_id}').`,
@@ -481,7 +557,6 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       });
     }
 
-    // 9. request_id validation
     if (!receipt.request_id || typeof receipt.request_id !== 'string') {
       return res.status(400).json({
         success: false,
@@ -490,7 +565,15 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       });
     }
 
-    // 10 & 11. Resolve Agent Ed25519 public key
+    if (receipt.request_id !== tokenPayload.request_id) {
+      return res.status(400).json({
+        success: false,
+        error: `request_id do recibo ('${receipt.request_id}') diverge do token ('${tokenPayload.request_id}').`,
+        error_code: 'RECEIPT_REQUEST_MISMATCH',
+      });
+    }
+
+    // Resolve Agent Ed25519 public key
     let agentPubKey: string | null = null;
     const deviceId = tokenPayload.device_id;
     if (deviceId && deviceId !== 'N/D') {
@@ -511,7 +594,7 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       });
     }
 
-    // 12-19. Verify Agent Ed25519 Signature over Canonical Receipt
+    // Verify Agent Ed25519 Signature over Canonical Receipt
     const receiptVerification = verifyAgentReceipt(
       receipt,
       receipt_signature,
@@ -520,7 +603,8 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       tokenPayload.device_id,
       tokenPayload.operation,
       uid,
-      receipt.request_id
+      receipt.request_id,
+      receipt.execution_id
     );
 
     if (!receiptVerification.valid) {
@@ -531,262 +615,177 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
       });
     }
 
-    // 20 & 21. Check authorized execution registry in Firestore
+    // Requirement 3: Atomic state transition check in Firestore Transaction
+    // ISSUED -> EXECUTING -> COMPLETED / FAILED / REVERTED
+    // Do NOT allow finalizing directly from ISSUED to COMPLETED without EXECUTING.
+    // Prevent double finalization.
     const execId = tokenPayload.execution_id || receipt.execution_id;
     const execRef = adminDb.collection('executions').doc(execId);
-    const execSnap = await execRef.get();
 
-    if (!execSnap.exists) {
+    const transactionResult = await adminDb.runTransaction(async (transaction) => {
+      const execSnap = await transaction.get(execRef);
+      if (!execSnap.exists) {
+        throw new Error('EXECUTION_NOT_FOUND');
+      }
+
+      const execData = execSnap.data()!;
+
+      // Requirement 2: Strict consistency checks
+      if (execData.execution_id !== receipt.execution_id) {
+        throw new Error('EXECUTION_ID_MISMATCH');
+      }
+      if (execData.request_id !== receipt.request_id) {
+        throw new Error('REQUEST_ID_MISMATCH');
+      }
+      if (execData.tool_id !== receipt.tool_id) {
+        throw new Error('TOOL_ID_MISMATCH');
+      }
+      if (execData.operation !== receipt.operation) {
+        throw new Error('OPERATION_MISMATCH');
+      }
+      if (execData.user_id !== uid && req.userDoc?.role !== 'ADMIN') {
+        throw new Error('USER_MISMATCH');
+      }
+      if (execData.device_id !== receipt.device_id) {
+        throw new Error('DEVICE_MISMATCH');
+      }
+
+      // Requirement 3: State enforcement
+      if (execData.status === 'ISSUED') {
+        throw new Error('INVALID_STATE_TRANSITION_FROM_ISSUED');
+      }
+
+      if (execData.status === 'COMPLETED' || execData.status === 'FAILED' || execData.status === 'REVERTED') {
+        throw new Error(`ALREADY_COMPLETED_${execData.status}`);
+      }
+
+      if (execData.status !== 'EXECUTING') {
+        throw new Error(`INVALID_STATUS_${execData.status}`);
+      }
+
+      // Determine final status from validated receipt
+      let finalExecStatus: 'COMPLETED' | 'FAILED' | 'REVERTED' = 'FAILED';
+      let historyStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
+
+      if (receipt.verified && receipt.status === 'APLICADO') {
+        finalExecStatus = 'COMPLETED';
+        historyStatus = 'SUCESSO';
+      } else if (receipt.verified && receipt.status === 'REVERTIDO') {
+        finalExecStatus = 'REVERTED';
+        historyStatus = 'REVERTIDO';
+      } else if (receipt.status === 'JA_APLICADO') {
+        finalExecStatus = 'COMPLETED';
+        historyStatus = 'SUCESSO';
+      } else {
+        finalExecStatus = 'FAILED';
+        historyStatus = 'FALHA';
+      }
+
+      const completedAt = new Date().toISOString();
+      const realDuration = Math.max(0, Number(receipt.duration_ms) || 0);
+
+      // Update execution registry document atomically
+      transaction.update(execRef, {
+        status: finalExecStatus,
+        completed_at: completedAt,
+        duration_ms: realDuration,
+        verified: Boolean(receipt.verified),
+        receipt,
+        receipt_signature,
+      });
+
+      // Record official optimization history atomically
+      const canonicalTool = CANONICAL_TOOLS[receipt.tool_id];
+      const toolName = canonicalTool?.nome || receipt.tool_id;
+      const category = canonicalTool?.categoria || 'SISTEMA';
+      const historyId = `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+      const historyRecord = {
+        history_id: historyId,
+        execution_id: execId,
+        optimization_id: `opt_${execId}`,
+        request_id: receipt.request_id,
+        user_id: uid,
+        device_id: tokenPayload.device_id,
+        tool_id: receipt.tool_id,
+        tool_name: toolName,
+        category,
+        date: completedAt,
+        status: historyStatus,
+        result: historyStatus === 'SUCESSO'
+          ? `Otimização ${toolName} aplicada e confirmada pelo Windows Agent.`
+          : historyStatus === 'REVERTIDO'
+          ? `Otimização ${toolName} revertida e confirmada pelo Windows Agent.`
+          : 'Operação reportou falha ou não foi verificada pelo Agent.',
+        details: receipt.after_state
+          ? `Estado validado: ${JSON.stringify(receipt.after_state)}`
+          : 'Execução auditada no Windows Agent.',
+        before_state: receipt.before_state || null,
+        after_state: receipt.after_state || null,
+        duration_ms: realDuration,
+        agent_version: receipt.agent_version || '1.1.0',
+        rollback_available: Boolean(receipt.rollback_available),
+        verified: Boolean(receipt.verified),
+        receipt_verified: true,
+        receipt_nonce: receipt.receipt_nonce,
+        agent_signature: receipt_signature,
+      };
+
+      const historyRef = adminDb.collection('optimization_history').doc(historyId);
+      transaction.set(historyRef, historyRecord);
+
+      return {
+        execution_id: execId,
+        status: finalExecStatus,
+        historyRecord,
+      };
+    });
+
+    res.json({
+      success: true,
+      verified: receipt.verified,
+      execution_id: transactionResult.execution_id,
+      status: transactionResult.status,
+      record: transactionResult.historyRecord,
+    });
+  } catch (err: any) {
+    const msg = err?.message || '';
+    if (msg === 'EXECUTION_NOT_FOUND') {
       return res.status(404).json({
         success: false,
         error: 'Registro de execução não encontrado no servidor.',
         error_code: 'EXECUTION_NOT_FOUND',
       });
     }
-
-    const execData = execSnap.data()!;
-    if (execData.status === 'COMPLETED' || execData.status === 'FAILED' || execData.status === 'REVERTED') {
+    if (msg === 'INVALID_STATE_TRANSITION_FROM_ISSUED') {
       return res.status(409).json({
         success: false,
-        error: `Esta execução já foi finalizada com status: ${execData.status}. Replay rejeitado.`,
+        error: 'Não é permitido finalizar uma execução diretamente de ISSUED para COMPLETED sem registrar EXECUTING.',
+        error_code: 'INVALID_STATE_TRANSITION',
+      });
+    }
+    if (msg.startsWith('ALREADY_COMPLETED_')) {
+      const cur = msg.replace('ALREADY_COMPLETED_', '');
+      return res.status(409).json({
+        success: false,
+        error: `Esta execução já foi finalizada com status: ${cur}. Replay rejeitado.`,
         error_code: 'EXECUTION_ALREADY_COMPLETED',
       });
     }
-
-    // Determine final status from validated receipt
-    let finalExecStatus: 'COMPLETED' | 'FAILED' | 'REVERTED' = 'FAILED';
-    let historyStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
-
-    if (receipt.verified && receipt.status === 'APLICADO') {
-      finalExecStatus = 'COMPLETED';
-      historyStatus = 'SUCESSO';
-    } else if (receipt.verified && receipt.status === 'REVERTIDO') {
-      finalExecStatus = 'REVERTED';
-      historyStatus = 'REVERTIDO';
-    } else if (receipt.status === 'JA_APLICADO') {
-      finalExecStatus = 'COMPLETED';
-      historyStatus = 'SUCESSO';
-    } else {
-      finalExecStatus = 'FAILED';
-      historyStatus = 'FALHA';
+    if (msg === 'REQUEST_ID_MISMATCH' || msg === 'EXECUTION_ID_MISMATCH' || msg === 'TOOL_ID_MISMATCH' || msg === 'OPERATION_MISMATCH' || msg === 'USER_MISMATCH' || msg === 'DEVICE_MISMATCH') {
+      return res.status(400).json({
+        success: false,
+        error: `Divergência detectada entre o registro de execução e o recibo (${msg}). Execução bloqueada.`,
+        error_code: 'RECEIPT_INVALID',
+      });
     }
 
-    // Update execution registry document
-    await execRef.update({
-      status: finalExecStatus,
-      completed_at: new Date().toISOString(),
-      duration_ms: Math.max(0, Number(receipt.duration_ms) || 0),
-      verified: Boolean(receipt.verified),
-      receipt,
-      receipt_signature,
-    });
-
-    // Record official history
-    const canonicalTool = CANONICAL_TOOLS[receipt.tool_id];
-    const toolName = canonicalTool?.nome || receipt.tool_id;
-    const category = canonicalTool?.categoria || 'SISTEMA';
-    const historyId = `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-
-    const historyRecord = {
-      history_id: historyId,
-      execution_id: execId,
-      optimization_id: `opt_${execId}`,
-      request_id: receipt.request_id,
-      user_id: uid,
-      device_id: tokenPayload.device_id,
-      tool_id: receipt.tool_id,
-      tool_name: toolName,
-      category,
-      date: new Date().toISOString(),
-      status: historyStatus,
-      result: historyStatus === 'SUCESSO'
-        ? `Otimização ${toolName} aplicada e confirmada pelo Windows Agent.`
-        : historyStatus === 'REVERTIDO'
-        ? `Otimização ${toolName} revertida e confirmada pelo Windows Agent.`
-        : 'Operação reportou falha ou não foi verificada pelo Agent.',
-      details: receipt.after_state
-        ? `Estado validado: ${JSON.stringify(receipt.after_state)}`
-        : 'Execução auditada no Windows Agent.',
-      before_state: receipt.before_state || null,
-      after_state: receipt.after_state || null,
-      duration_ms: Math.max(0, Number(receipt.duration_ms) || 0),
-      agent_version: receipt.agent_version || '1.1.0',
-      rollback_available: Boolean(receipt.rollback_available),
-      verified: Boolean(receipt.verified),
-      receipt_verified: true,
-      receipt_nonce: receipt.receipt_nonce,
-      agent_signature: receipt_signature,
-    };
-
-    await adminDb.collection('optimization_history').doc(historyId).set(historyRecord);
-
-    res.json({
-      success: true,
-      verified: receipt.verified,
-      execution_id: execId,
-      status: finalExecStatus,
-      record: historyRecord,
-    });
-  } catch (err: any) {
     console.error('Erro ao finalizar execução no servidor:', err);
     res.status(500).json({
       success: false,
       error: 'Erro interno ao processar recibo de execução.',
       details: err?.message || err,
     });
-  }
-});
-
-// Record Verified Optimization Execution Result in History (Legacy & Direct Integration Support)
-app.post('/api/tools/record-result', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const {
-      execution_token,
-      request_id,
-      optimization_id,
-      device_id,
-      tool_id,
-      status,
-      result,
-      duration_ms,
-      agent_version,
-      before_state,
-      after_state,
-      verified,
-      rollback_available,
-      error,
-      details,
-      receipt,
-      receipt_signature,
-      agent_public_key,
-    } = req.body;
-
-    const uid = req.user!.uid;
-
-    if (!tool_id || !status) {
-      return res.status(400).json({ error: 'tool_id e status são obrigatórios.', error_code: 'REQUEST_INVALID' });
-    }
-
-    // Section 25 & 26: Validate execution token before recording result
-    if (!execution_token || typeof execution_token !== 'string') {
-      return res.status(400).json({
-        error: 'Gravação rejeitada: ausente execution_token assinado.',
-        error_code: 'INVALID_TOKEN',
-      });
-    }
-
-    const tokenVerification = verifyOptimizationExecutionToken(execution_token, tool_id, device_id);
-    if (!tokenVerification.valid || !tokenVerification.payload) {
-      return res.status(403).json({
-        error: tokenVerification.error || 'Token de execução inválido ou expirado.',
-        error_code: tokenVerification.error_code || 'INVALID_TOKEN',
-      });
-    }
-
-    if (tokenVerification.payload.user_id !== uid && req.userDoc?.role !== 'ADMIN') {
-      return res.status(403).json({
-        error: 'Token emitido para usuário diferente do autenticado.',
-        error_code: 'TOKEN_USER_MISMATCH',
-      });
-    }
-
-    const targetDeviceId = device_id || tokenVerification.payload.device_id || 'N/D';
-
-    // Resolve Agent Ed25519 public key
-    let resolvedAgentPubKey: string | null = null;
-    if (typeof agent_public_key === 'string' && /^[0-9a-fA-F]{64}$/.test(agent_public_key.trim())) {
-      resolvedAgentPubKey = agent_public_key.trim().toLowerCase();
-    } else if (targetDeviceId && targetDeviceId !== 'N/D') {
-      const devDoc = await adminDb.collection('devices').doc(targetDeviceId).get();
-      if (devDoc.exists && devDoc.data()?.agent_public_key) {
-        resolvedAgentPubKey = devDoc.data()!.agent_public_key;
-      }
-    }
-    if (!resolvedAgentPubKey && req.userDoc?.agent_public_key) {
-      resolvedAgentPubKey = req.userDoc.agent_public_key;
-    }
-
-    // Validate Agent Receipt cryptographic signature if receipt is provided
-    let isReceiptCryptographicallyVerified = false;
-    if (receipt && receipt_signature) {
-      if (!resolvedAgentPubKey) {
-        return res.status(403).json({
-          error: 'Chave pública do Agent não registrada no servidor para validação do recibo.',
-          error_code: 'DEVICE_NOT_REGISTERED',
-        });
-      }
-
-      const receiptVerification = verifyAgentReceipt(
-        receipt,
-        receipt_signature,
-        resolvedAgentPubKey,
-        tool_id,
-        targetDeviceId,
-        tokenVerification.payload.operation,
-        uid,
-        request_id
-      );
-
-      if (!receiptVerification.valid) {
-        console.warn(`[Security] [Receipt] Recibo rejeitado: ${receiptVerification.error} (${receiptVerification.error_code})`);
-        return res.status(403).json({
-          error: `Recibo rejeitado por assinatura inválida do Agent: ${receiptVerification.error}`,
-          error_code: receiptVerification.error_code || 'RECEIPT_SIGNATURE_INVALID',
-        });
-      }
-
-      isReceiptCryptographicallyVerified = true;
-    }
-
-    const canonicalTool = CANONICAL_TOOLS[tool_id];
-    const toolName = canonicalTool?.nome || tool_id;
-    const category = canonicalTool?.categoria || 'SISTEMA';
-
-    // Section 24 & 26: Success strict mode:
-    // Somente registrar SUCESSO quando: execution_token válido + Agent confirmou + success=true + verified=true
-    let finalStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
-    if (status === 'REVERTIDO' && verified) {
-      finalStatus = 'REVERTIDO';
-    } else if (status === 'SUCESSO' && verified) {
-      finalStatus = 'SUCESSO';
-    } else {
-      finalStatus = 'FALHA';
-    }
-
-    const historyId = optimization_id || `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const realDuration = typeof duration_ms === 'number' ? Math.max(0, duration_ms) : 0;
-
-    const record = {
-      history_id: historyId,
-      user_id: uid,
-      device_id: targetDeviceId,
-      tool_id,
-      tool_name: toolName,
-      category,
-      date: new Date().toISOString(),
-      status: finalStatus,
-      result: result || (finalStatus === 'SUCESSO' ? 'Otimização aplicada e confirmada pelo Agent.' : 'Operação falhou na execução ou verificação.'),
-      duration_ms: realDuration,
-      details: typeof details === 'string' && details ? details : (finalStatus === 'SUCESSO' ? 'Configuração validada no subsistema do Windows.' : error || 'Verificação rejeitada.'),
-      before_state: before_state || null,
-      after_state: after_state || null,
-      agent_version: agent_version || '1.1.0',
-      error: error || null,
-      rollback_available: Boolean(rollback_available),
-      verified: Boolean(verified),
-      receipt_verified: isReceiptCryptographicallyVerified,
-      receipt_nonce: receipt?.receipt_nonce || null,
-      agent_signature: receipt_signature || null,
-      request_id: request_id || null,
-      optimization_id: optimization_id || null,
-    };
-
-    await adminDb.collection('optimization_history').doc(historyId).set(record);
-
-    res.json({ success: true, record });
-  } catch (err) {
-    console.error('Erro ao gravar histórico oficial:', err);
-    res.status(500).json({ error: 'Falha ao registrar histórico de execução.' });
   }
 });
 

@@ -16,11 +16,13 @@ namespace Agent {
 // Result of cryptographic token validation
 struct TokenValidationResult {
     bool valid = false;
+    int protocolVersion = 0;
+    std::string executionId;
+    std::string requestId;
+    std::string operation;
     std::string toolId;
     std::string userId;
     std::string deviceId;
-    std::string executionId;
-    std::string operation;
     std::string nonce;
     int64_t iat = 0;
     int64_t exp = 0;
@@ -42,12 +44,32 @@ public:
         return kServerPubKey;
     }
 
+    /**
+     * Requirement 7: Base64URL decode with strict character rejection.
+     * Rejects invalid characters immediately instead of ignoring them.
+     */
     static std::vector<uint8_t> Base64UrlDecode(const std::string& input) {
-        std::string base64 = input;
-        for (char& c : base64) {
-            if (c == '-') c = '+';
-            else if (c == '_') c = '/';
+        std::vector<uint8_t> empty;
+        if (input.empty()) return empty;
+
+        std::string base64;
+        base64.reserve(input.size() + 4);
+
+        for (char c : input) {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                base64.push_back(c);
+            } else if (c == '-') {
+                base64.push_back('+');
+            } else if (c == '_') {
+                base64.push_back('/');
+            } else if (c == '=') {
+                base64.push_back('=');
+            } else {
+                // Reject invalid characters in Base64URL string
+                return empty;
+            }
         }
+
         while (base64.size() % 4 != 0) {
             base64.push_back('=');
         }
@@ -71,7 +93,7 @@ public:
         for (uint8_t c : base64) {
             if (c == '=') break;
             int8_t v = table[c];
-            if (v == -1) continue;
+            if (v == -1) return empty; // Strict: reject invalid character
             val = (val << 6) | v;
             valb += 6;
             if (valb >= 0) {
@@ -84,7 +106,6 @@ public:
 
     /**
      * Purges only expired nonces (exp < nowSec).
-     * Section 5: NUNCA usar consumedNonces.clear().
      */
     static void PurgeExpiredNonces(std::unordered_map<std::string, int64_t>& store, int64_t nowSec) {
         for (auto it = store.begin(); it != store.end(); ) {
@@ -128,28 +149,33 @@ public:
     }
 
     /**
-     * Validates an optimization execution token against expected parameters.
-     * Format: <base64url(payload)>.<base64url(signature)>
+     * Requirement 7:
+     * O TokenValidator do Agent precisa validar:
+     * protocol_version, execution_id, request_id, operation, tool_id, user_id, device_id, nonce, iat, exp.
+     * Validar tipos e existência dos campos.
+     * Não aceitar campo ausente como valor padrão válido.
      */
     static TokenValidationResult ValidateToken(
         const std::string& expectedToolId,
         const std::string& tokenStr,
         const std::string& localDeviceId = "",
         const std::string& expectedOperation = "APPLY",
-        const std::string& expectedUserId = ""
+        const std::string& expectedUserId = "",
+        const std::string& expectedRequestId = "",
+        const std::string& expectedExecutionId = ""
     ) {
         TokenValidationResult res;
 
         if (tokenStr.empty()) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Token de autorizacao ausente no payload.";
+            res.error = "Token de autorização ausente no payload.";
             return res;
         }
 
         size_t dotPos = tokenStr.find('.');
         if (dotPos == std::string::npos) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Formato de token invalido: ausente delimitador de assinatura.";
+            res.error = "Formato de token inválido: delimitador de assinatura ausente.";
             return res;
         }
 
@@ -161,7 +187,7 @@ public:
 
         if (payloadBytes.empty() || sigBytes.size() != 64) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Comprimento ou decodificacao de assinatura invalida.";
+            res.error = "Comprimento ou decodificação de assinatura inválida (Base64URL inválido ou corrompido).";
             return res;
         }
 
@@ -170,7 +196,7 @@ public:
         if (!sigValid) {
             Logger::Instance().Warn("[Security] Cryptographic signature check FAILED for optimization token.");
             res.errorCode = "TOKEN_SIGNATURE_INVALID";
-            res.error = "Assinatura criptografica do servidor rejeitada.";
+            res.error = "Assinatura criptográfica do servidor rejeitada.";
             return res;
         }
 
@@ -180,69 +206,130 @@ public:
 
         if (!payloadJson.is_object()) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Conteudo de token assinado nao e um JSON valido.";
+            res.error = "Conteúdo de token assinado não é um JSON válido.";
             return res;
         }
 
-        int64_t protocolVersion = payloadJson.get_field_int64("protocol_version", 1);
-        if (protocolVersion != 1) {
+        // REQUIREMENT 7: Validate existence and types of all required fields.
+        // No defaults for missing fields!
+        const std::vector<std::pair<std::string, JsonValue::Type>> requiredFields = {
+            {"protocol_version", JsonValue::Type::Number},
+            {"execution_id", JsonValue::Type::String},
+            {"request_id", JsonValue::Type::String},
+            {"operation", JsonValue::Type::String},
+            {"tool_id", JsonValue::Type::String},
+            {"user_id", JsonValue::Type::String},
+            {"device_id", JsonValue::Type::String},
+            {"nonce", JsonValue::Type::String},
+            {"iat", JsonValue::Type::Number},
+            {"exp", JsonValue::Type::Number}
+        };
+
+        for (const auto& fieldReq : requiredFields) {
+            if (!payloadJson.has_field(fieldReq.first)) {
+                res.errorCode = "INVALID_TOKEN";
+                res.error = "Campo obrigatório ausente no token: " + fieldReq.first;
+                return res;
+            }
+            JsonValue val = payloadJson.get(fieldReq.first);
+            if (val.type != fieldReq.second) {
+                res.errorCode = "INVALID_TOKEN";
+                res.error = "Tipo inválido para o campo: " + fieldReq.first;
+                return res;
+            }
+        }
+
+        // Extract validated fields
+        res.protocolVersion = payloadJson.get("protocol_version").get_int();
+        res.executionId = payloadJson.get("execution_id").get_string();
+        res.requestId = payloadJson.get("request_id").get_string();
+        res.operation = payloadJson.get("operation").get_string();
+        res.toolId = payloadJson.get("tool_id").get_string();
+        res.userId = payloadJson.get("user_id").get_string();
+        res.deviceId = payloadJson.get("device_id").get_string();
+        res.nonce = payloadJson.get("nonce").get_string();
+        res.iat = payloadJson.get("iat").get_int64();
+        res.exp = payloadJson.get("exp").get_int64();
+
+        // 1. Protocol version validation
+        if (res.protocolVersion != 1) {
             res.errorCode = "PROTOCOL_MISMATCH";
-            res.error = "Versao de protocolo do token incompativel.";
+            res.error = "Versão de protocolo do token incompatível.";
             return res;
         }
 
-        res.toolId = payloadJson.get_field_string("tool_id", "");
-        res.userId = payloadJson.get_field_string("user_id", "");
-        res.deviceId = payloadJson.get_field_string("device_id", "");
-        res.executionId = payloadJson.get_field_string("execution_id", "");
-        res.operation = payloadJson.get_field_string("operation", "APPLY");
-        res.nonce = payloadJson.get_field_string("nonce", "");
-        res.iat = payloadJson.get_field_int64("iat", 0);
-        res.exp = payloadJson.get_field_int64("exp", 0);
+        // Check non-empty strings
+        if (res.executionId.empty()) {
+            res.errorCode = "INVALID_TOKEN";
+            res.error = "execution_id não pode ser vazio no token.";
+            return res;
+        }
+        if (res.requestId.empty()) {
+            res.errorCode = "INVALID_TOKEN";
+            res.error = "request_id não pode ser vazio no token.";
+            return res;
+        }
+        if (res.toolId.empty()) {
+            res.errorCode = "INVALID_TOKEN";
+            res.error = "tool_id não pode ser vazio no token.";
+            return res;
+        }
+        if (res.userId.empty()) {
+            res.errorCode = "INVALID_TOKEN";
+            res.error = "user_id não pode ser vazio no token.";
+            return res;
+        }
+        if (res.deviceId.empty() || res.deviceId == "N/D") {
+            res.errorCode = "DEVICE_NOT_REGISTERED";
+            res.error = "Token sem identificador de dispositivo válido (device_id não pode ser N/D ou vazio).";
+            return res;
+        }
 
-        // 3. Validate operation
+        // 2. Validate operation
         if (res.operation != "APPLY" && res.operation != "ROLLBACK") {
             res.errorCode = "TOKEN_OPERATION_MISMATCH";
-            res.error = "Operacao desconhecida no token: " + res.operation;
+            res.error = "Operação desconhecida no token: " + res.operation;
             return res;
         }
         if (!expectedOperation.empty() && res.operation != expectedOperation) {
             res.errorCode = "TOKEN_OPERATION_MISMATCH";
-            res.error = "Operacao do token ('" + res.operation + "') diverge da solicitada ('" + expectedOperation + "').";
+            res.error = "Operação do token ('" + res.operation + "') diverge da solicitada ('" + expectedOperation + "').";
             return res;
         }
 
-        // 4. Validate tool_id matching
+        // 3. Validate tool_id matching
         if (!expectedToolId.empty() && res.toolId != expectedToolId) {
             res.errorCode = "TOKEN_TOOL_MISMATCH";
-            res.error = "Token emitido para ferramenta '" + res.toolId + "' nao corresponde a ferramenta solicitada '" + expectedToolId + "'.";
+            res.error = "Token emitido para ferramenta '" + res.toolId + "' não corresponde à ferramenta solicitada '" + expectedToolId + "'.";
             return res;
         }
 
-        // 5. Validate user_id
-        if (res.userId.empty()) {
-            res.errorCode = "TOKEN_USER_MISMATCH";
-            res.error = "Token de autorizacao sem identificador de usuario valido.";
-            return res;
-        }
+        // 4. Validate user_id matching
         if (!expectedUserId.empty() && res.userId != expectedUserId) {
             res.errorCode = "TOKEN_USER_MISMATCH";
-            res.error = "Usuario do token ('" + res.userId + "') diverge do esperado ('" + expectedUserId + "').";
+            res.error = "Usuário do token ('" + res.userId + "') diverge do esperado ('" + expectedUserId + "').";
             return res;
         }
 
-        // 6. Validate device_id: must be non-empty, never N/D, and match local device if known
-        if (res.deviceId.empty() || res.deviceId == "N/D") {
-            res.errorCode = "DEVICE_NOT_REGISTERED";
-            res.error = "Token sem identificador de dispositivo valido.";
-            return res;
-        }
+        // 5. Validate device_id matching
         if (!localDeviceId.empty() && localDeviceId != "N/D") {
             if (res.deviceId != localDeviceId) {
                 res.errorCode = "DEVICE_MISMATCH";
-                res.error = "Dispositivo do token ('" + res.deviceId + "') nao corresponde ao identificador do Agent ('" + localDeviceId + "').";
+                res.error = "Dispositivo do token ('" + res.deviceId + "') não corresponde ao identificador do Agent ('" + localDeviceId + "').";
                 return res;
             }
+        }
+
+        // 6. Validate request_id and execution_id matching if specified
+        if (!expectedRequestId.empty() && res.requestId != expectedRequestId) {
+            res.errorCode = "RECEIPT_REQUEST_MISMATCH";
+            res.error = "request_id do token ('" + res.requestId + "') diverge do esperado ('" + expectedRequestId + "').";
+            return res;
+        }
+        if (!expectedExecutionId.empty() && res.executionId != expectedExecutionId) {
+            res.errorCode = "RECEIPT_INVALID";
+            res.error = "execution_id do token ('" + res.executionId + "') diverge do esperado ('" + expectedExecutionId + "').";
+            return res;
         }
 
         // 7. Validate timestamps and TTL
@@ -250,31 +337,31 @@ public:
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
 
-        // Expired check with 15-second clock skew grace period (evaluated first for expired tokens)
+        // Expired check with 15-second clock skew tolerance
         if (res.exp < (nowSec - 15) || res.exp <= nowSec) {
             res.errorCode = "TOKEN_EXPIRED";
-            res.error = "Token de autorizacao expirado no servidor.";
+            res.error = "Token de autorização expirado no servidor.";
             return res;
         }
 
         // iat in future beyond 15s clock skew
         if (res.iat > (nowSec + 15)) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Token emitido com data futura alem da tolerancia.";
+            res.error = "Token emitido com data futura além da tolerância.";
             return res;
         }
 
         // exp <= iat
         if (res.exp <= res.iat) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "Tempo de expiracao invalido no token (exp <= iat).";
+            res.error = "Tempo de expiração inválido no token (exp <= iat).";
             return res;
         }
 
         // TTL > 60s
         if ((res.exp - res.iat) > 60) {
             res.errorCode = "INVALID_TOKEN";
-            res.error = "TTL do token superior ao limite maximo de 60 segundos.";
+            res.error = "TTL do token superior ao limite máximo de 60 segundos.";
             return res;
         }
 
@@ -289,11 +376,11 @@ public:
         if (!nonceErr.empty()) {
             res.errorCode = nonceErr;
             if (nonceErr == "TOKEN_REPLAY") {
-                res.error = "Token de autorizacao ja consumido anteriormente (replay detectado).";
+                res.error = "Token de autorização já consumido anteriormente (replay detectado).";
             } else if (nonceErr == "NONCE_STORE_FULL") {
-                res.error = "Capacidade do registro de nonces atingida (rejeitado por seguranca).";
+                res.error = "Capacidade do registro de nonces atingida (rejeitado por segurança).";
             } else {
-                res.error = "Erro na validacao do nonce do token.";
+                res.error = "Erro na validação do nonce do token.";
             }
             return res;
         }

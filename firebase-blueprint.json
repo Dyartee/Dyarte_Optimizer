@@ -139,6 +139,7 @@
         "issued_at": { "type": "string" },
         "expires_at": { "type": "string" },
         "status": { "type": "string", "enum": ["ISSUED", "EXECUTING", "COMPLETED", "FAILED", "REVERTED"] },
+        "started_at": { "type": "string" },
         "completed_at": { "type": "string" },
         "created_at": { "type": "string" }
       },

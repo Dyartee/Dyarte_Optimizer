@@ -52,8 +52,8 @@ export interface IOptimizationHandler {
 
   checkCompatibility(): Promise<{ compatible: boolean; reason?: string }>;
   inspectCurrentState(): Promise<any>;
-  apply(executionToken?: string): Promise<OptimizationExecutionResult>;
-  rollback(beforeState?: any, executionToken?: string): Promise<OptimizationRollbackResult>;
+  apply(executionToken?: string, backendRequestId?: string): Promise<OptimizationExecutionResult>;
+  rollback(beforeState?: any, executionToken?: string, backendRequestId?: string): Promise<OptimizationRollbackResult>;
   verify(): Promise<boolean>;
 }
 
@@ -101,7 +101,7 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
     return status.power_scheme || { error: 'Estado de energia não informado' };
   }
 
-  public async apply(executionToken?: string): Promise<OptimizationExecutionResult> {
+  public async apply(executionToken?: string, backendRequestId?: string): Promise<OptimizationExecutionResult> {
     if (!executionToken) {
       return {
         success: false,
@@ -113,6 +113,20 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
         durationMs: 0,
         message: 'Token de execução obrigatório ausente. A otimização deve ser autorizada pelo backend.',
         error: 'INVALID_TOKEN',
+      };
+    }
+
+    if (!backendRequestId) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        beforeState: null,
+        afterState: null,
+        rollbackAvailable: false,
+        durationMs: 0,
+        message: 'request_id do backend obrigatório ausente. A otimização deve possuir identificador único do backend.',
+        error: 'REQUEST_ID_MISSING',
       };
     }
 
@@ -131,7 +145,7 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
       };
     }
 
-    const resp: AgentOptimizationResponse = await agentBridge.requestApplyOptimization(this.id, executionToken, 10000);
+    const resp: AgentOptimizationResponse = await agentBridge.requestApplyOptimization(this.id, executionToken, backendRequestId, 10000);
 
     return {
       success: resp.success,
@@ -150,7 +164,7 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
     };
   }
 
-  public async rollback(beforeState?: any, executionToken?: string): Promise<OptimizationRollbackResult> {
+  public async rollback(beforeState?: any, executionToken?: string, backendRequestId?: string): Promise<OptimizationRollbackResult> {
     if (agentBridge.getState() !== 'AGENT_ONLINE') {
       return {
         success: false,
@@ -175,7 +189,19 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
       };
     }
 
-    const resp: AgentOptimizationResponse = await agentBridge.requestRollbackOptimization(this.id, executionToken, 10000);
+    if (!backendRequestId) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: 'request_id do backend obrigatório ausente para rollback.',
+        error: 'REQUEST_ID_MISSING',
+        error_code: 'REQUEST_ID_MISSING',
+      };
+    }
+
+    const resp: AgentOptimizationResponse = await agentBridge.requestRollbackOptimization(this.id, executionToken, backendRequestId, 10000);
 
     return {
       success: resp.success,
@@ -238,7 +264,7 @@ export class GenericAgentOptimizationHandler implements IOptimizationHandler {
     return { status: 'DISPONIVEL', tool_id: this.id };
   }
 
-  public async apply(_executionToken?: string): Promise<OptimizationExecutionResult> {
+  public async apply(_executionToken?: string, _backendRequestId?: string): Promise<OptimizationExecutionResult> {
     // Section 15: GenericAgentOptimizationHandler não deve enviar comandos para ferramentas NOT_IMPLEMENTED.
     // Retorna diretamente sem comunicar ao Agent.
     return {
@@ -255,7 +281,7 @@ export class GenericAgentOptimizationHandler implements IOptimizationHandler {
     };
   }
 
-  public async rollback(_beforeState?: any, _executionToken?: string): Promise<OptimizationRollbackResult> {
+  public async rollback(_beforeState?: any, _executionToken?: string, _backendRequestId?: string): Promise<OptimizationRollbackResult> {
     return {
       success: false,
       verified: false,
@@ -327,7 +353,8 @@ export class OptimizationEngine {
   public async applyTool(
     toolId: string,
     userPlanLevel: PlanLevel = 1,
-    executionToken?: string
+    executionToken?: string,
+    backendRequestId?: string
   ): Promise<OptimizationExecutionResult> {
     const handler = this.getHandler(toolId);
     if (!handler) {
@@ -359,7 +386,7 @@ export class OptimizationEngine {
       };
     }
 
-    return await handler.apply(executionToken);
+    return await handler.apply(executionToken, backendRequestId);
   }
 
   /**
@@ -368,9 +395,10 @@ export class OptimizationEngine {
   public async executeTool(
     toolId: string,
     userPlanLevel: PlanLevel = 1,
-    executionToken?: string
+    executionToken?: string,
+    backendRequestId?: string
   ): Promise<OptimizationExecutionResult> {
-    return this.applyTool(toolId, userPlanLevel, executionToken);
+    return this.applyTool(toolId, userPlanLevel, executionToken, backendRequestId);
   }
 
   /**
@@ -380,7 +408,8 @@ export class OptimizationEngine {
     toolId: string,
     userPlanLevel: PlanLevel = 1,
     beforeState?: any,
-    executionToken?: string
+    executionToken?: string,
+    backendRequestId?: string
   ): Promise<OptimizationRollbackResult> {
     const handler = this.getHandler(toolId);
     if (!handler) {
@@ -407,7 +436,7 @@ export class OptimizationEngine {
       };
     }
 
-    return await handler.rollback(beforeState, executionToken);
+    return await handler.rollback(beforeState, executionToken, backendRequestId);
   }
 }
 

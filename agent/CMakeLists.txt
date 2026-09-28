@@ -24,6 +24,7 @@ set(HEADERS
     include/ed25519_verify.h
     include/agent_identity.h
     include/token_validator.h
+    include/hardware_inventory.h
 )
 
 # Executable target
@@ -31,7 +32,7 @@ add_executable(dyarte-agent ${SOURCES} ${HEADERS})
 
 # Windows Socket and Cryptography libraries
 if(WIN32)
-    target_link_libraries(dyarte-agent PRIVATE ws2_32 crypt32)
+    target_link_libraries(dyarte-agent PRIVATE ws2_32 crypt32 bcrypt wbemuuid)
     target_compile_definitions(dyarte-agent PRIVATE _WIN32_WINNT=0x0A00)
 endif()
 

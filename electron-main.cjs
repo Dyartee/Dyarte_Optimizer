@@ -7,7 +7,64 @@ const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const driverService = require('./driverService.cjs');
+
+const SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
+const SERVER_ED25519_PUB_HEX = '9fc58ae7dd4361cad6a68dabefa3e061fbe684a76c0e91d53ad85a120e2d6666';
+
+/**
+ * Requirement 9: Driver / DDU Central Authorization Validator
+ * O Electron Main Process deve impedir chamadas arbitrárias de mutação vindas do renderer.
+ */
+function verifyExecutionTokenForIpc(tokenStr, allowedToolIds) {
+  if (!tokenStr || typeof tokenStr !== 'string' || tokenStr.trim().length === 0) {
+    return { valid: false, error: 'Token de execução obrigatório ausente. Operação bloqueada pelo Electron.' };
+  }
+
+  const dotIdx = tokenStr.indexOf('.');
+  if (dotIdx === -1) {
+    return { valid: false, error: 'Token de execução com formato inválido.' };
+  }
+
+  try {
+    const payloadBuf = Buffer.from(tokenStr.substring(0, dotIdx), 'base64url');
+    const sigBuf = Buffer.from(tokenStr.substring(dotIdx + 1), 'base64url');
+
+    if (sigBuf.length !== 64 || payloadBuf.length === 0) {
+      return { valid: false, error: 'Comprimento ou decodificação da assinatura do token inválida.' };
+    }
+
+    const pubKey = crypto.createPublicKey({
+      key: Buffer.concat([SPKI_HEADER, Buffer.from(SERVER_ED25519_PUB_HEX, 'hex')]),
+      format: 'der',
+      type: 'spki',
+    });
+
+    const isSigValid = crypto.verify(null, payloadBuf, pubKey, sigBuf);
+    if (!isSigValid) {
+      return { valid: false, error: 'Assinatura criptográfica do token de execução rejeitada pelo Electron.' };
+    }
+
+    const payload = JSON.parse(payloadBuf.toString('utf8'));
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    if (payload.exp && payload.exp <= nowSec) {
+      return { valid: false, error: 'Token de autorização expirado no servidor.' };
+    }
+
+    if (Array.isArray(allowedToolIds) && !allowedToolIds.includes(payload.tool_id)) {
+      return {
+        valid: false,
+        error: `Ferramenta autorizada no token ('${payload.tool_id}') não corresponde à operação solicitada.`,
+      };
+    }
+
+    return { valid: true, payload };
+  } catch (err) {
+    return { valid: false, error: 'Falha na validação criptográfica do token: ' + (err.message || err) };
+  }
+}
 
 const SERVER_PORT = 3000;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
@@ -348,7 +405,26 @@ function setupIpcHandlers() {
     return driverService.findDriverInstaller(vendor);
   });
 
-  ipcMain.handle('drivers:execute', async (_event, vendor) => {
+  ipcMain.handle('drivers:execute', async (_event, vendor, executionToken) => {
+    // Requirement 9: Never allow React -> Electron -> Execute without Backend Authorization Token
+    const authCheck = verifyExecutionTokenForIpc(executionToken, [
+      'tool_gpu_amd_driver',
+      'tool_gpu_nvidia_driver',
+      'tool_gpu_amd_opt',
+      'tool_gpu_nvidia_opt',
+      'tool_driver_installer',
+    ]);
+
+    if (!authCheck.valid) {
+      console.error('[Electron] [Security] drivers:execute BLOQUEADO:', authCheck.error);
+      return {
+        success: false,
+        phase: 'failed',
+        error_code: 'UNAUTHORIZED_MUTATION',
+        error: `OPERAÇÃO DE DRIVER BLOQUEADA: ${authCheck.error}`,
+      };
+    }
+
     return await driverService.executeDriverInstaller(vendor);
   });
 
@@ -361,7 +437,24 @@ function setupIpcHandlers() {
     return driverService.getDduPath();
   });
 
-  ipcMain.handle('ddu:execute', async () => {
+  ipcMain.handle('ddu:execute', async (_event, executionToken) => {
+    // Requirement 9: Never allow DDU execution without Backend Authorization Token
+    const authCheck = verifyExecutionTokenForIpc(executionToken, [
+      'tool_gpu_clean_drivers',
+      'tool_clean_ddu',
+    ]);
+
+    if (!authCheck.valid) {
+      console.error('[Electron] [Security] ddu:execute BLOQUEADO:', authCheck.error);
+      return {
+        status: 'DDU_FAILED',
+        success: false,
+        error_code: 'UNAUTHORIZED_MUTATION',
+        error: `OPERAÇÃO DDU BLOQUEADA: ${authCheck.error}`,
+        message: `OPERAÇÃO DDU BLOQUEADA: ${authCheck.error}`,
+      };
+    }
+
     return await driverService.executeDdu();
   });
 
@@ -370,7 +463,23 @@ function setupIpcHandlers() {
     return driverService.getDduPath();
   });
 
-  ipcMain.handle('driver:execute-ddu', async () => {
+  ipcMain.handle('driver:execute-ddu', async (_event, executionToken) => {
+    const authCheck = verifyExecutionTokenForIpc(executionToken, [
+      'tool_gpu_clean_drivers',
+      'tool_clean_ddu',
+    ]);
+
+    if (!authCheck.valid) {
+      console.error('[Electron] [Security] driver:execute-ddu BLOQUEADO:', authCheck.error);
+      return {
+        status: 'DDU_FAILED',
+        success: false,
+        error_code: 'UNAUTHORIZED_MUTATION',
+        error: `OPERAÇÃO DDU BLOQUEADA: ${authCheck.error}`,
+        message: `OPERAÇÃO DDU BLOQUEADA: ${authCheck.error}`,
+      };
+    }
+
     return await driverService.executeDdu();
   });
 

@@ -14,6 +14,7 @@
 #include "json_helper.h"
 #include "token_validator.h"
 #include "agent_identity.h"
+#include "hardware_inventory.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -415,6 +416,21 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 ramTotalStr = std::to_string(totalGb) + " GB";
             }
 
+            JsonValue cpuJ = JsonValue::parse(HardwareInventory::detectCPU());
+            JsonValue gpuJ = JsonValue::parse(HardwareInventory::detectGPU());
+            JsonValue moboJ = JsonValue::parse(HardwareInventory::detectMotherboard());
+            JsonValue biosJ = JsonValue::parse(HardwareInventory::detectBIOS());
+            JsonValue secJ = JsonValue::parse(HardwareInventory::detectSecurity());
+
+            std::string cpuName = cpuJ.get_field_string("commercial_name", "");
+            std::string gpuName = gpuJ.get_field_string("full_name", "");
+            std::string moboName = moboJ.get_field_string("product_name", "");
+            std::string biosVer = biosJ.get_field_string("version", "");
+            int sbState = -1;
+            if (secJ.has_field("secure_boot") && secJ.get("secure_boot").is_bool()) {
+                sbState = secJ.get("secure_boot").get_bool() ? 1 : 0;
+            }
+
             std::string agentPubHex = AgentIdentity::GetPublicKeyHex();
             std::string response = ResponseBuilder::BuildStatusResult(
                 requestId,
@@ -423,13 +439,13 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 curScheme.guid,
                 curScheme.name,
                 persistentDeviceId,
-                "", // cpu
-                "", // gpu
+                cpuName,
+                gpuName,
                 ramTotalStr,
                 "",
-                "",
-                "",
-                -1, // secureBoot null by default unless probed
+                moboName,
+                biosVer,
+                sbState,
                 agentPubHex
             );
 #else
@@ -441,18 +457,27 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 "",
                 "",
                 persistentDeviceId,
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
+                "N/D",
+                "N/D",
+                "N/D",
+                "N/D",
+                "N/D",
+                "N/D",
                 -1,
                 agentPubHex
             );
 #endif
             g_serverInstance->SendTextMessage(clientSock, response);
-            Logger::Instance().Info("STATUS_RESULT dispatched.");
+            Logger::Instance().Info("STATUS_RESULT dispatched with real hardware inventory.");
+            break;
+        }
+
+        case MessageType::GET_HARDWARE_INVENTORY: {
+            Logger::Instance().Info("GET_HARDWARE_INVENTORY received. Request ID: " + requestId);
+            std::string fullInvJson = HardwareInventory::getFullInventory();
+            std::string response = ResponseBuilder::BuildHardwareInventoryResult(requestId, fullInvJson);
+            g_serverInstance->SendTextMessage(clientSock, response);
+            Logger::Instance().Info("HARDWARE_INVENTORY_RESULT dispatched.");
             break;
         }
 
@@ -597,8 +622,38 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     break;
                 }
 
-                // Section 11 & 12: Salva snapshot atômico persistente em disco antes da alteração com verificação estrita
-                const bool backupOk = SavePersistentSnapshot(requestId, tokenRes.executionId, deviceId, toolId, beforeJson, "{\"guid\":\"" + highPerfBase + "\"}");
+                // Requirement 8: Fluxo obrigatório
+                // 1. Detectar plano atual
+                // 2. Detectar plano-alvo
+                std::string targetGuid = FindExistingHighPerformanceSchemeGuid();
+                if (targetGuid.empty()) {
+                    targetGuid = DuplicateHighPerformanceScheme();
+                }
+
+                // 3. Validar GUID: NUNCA assumir GUID padrão se o GUID real não foi encontrado!
+                if (targetGuid.empty() || !IsValidGuid(targetGuid)) {
+                    std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                        requestId,
+                        toolId,
+                        "FALHA",
+                        false,
+                        false,
+                        beforeJson,
+                        "{}",
+                        false,
+                        0,
+                        "POWER_PLAN_NOT_FOUND: Nenhum plano de Alto Desempenho válido pôde ser localizado ou duplicado no Windows.",
+                        "Plano-alvo não encontrado no sistema operacional.",
+                        "POWER_PLAN_NOT_FOUND"
+                    );
+                    g_serverInstance->SendTextMessage(clientSock, response);
+                    Logger::Instance().Error("tool_perf_power_plan aborted: Target GUID not found.");
+                    break;
+                }
+
+                // 4. Criar snapshot do estado real com before_state e target_state (usando o GUID realmente encontrado/criado)
+                std::string targetStateJson = "{\"guid\":\"" + targetGuid + "\",\"name\":\"Alto desempenho\"}";
+                const bool backupOk = SavePersistentSnapshot(requestId, tokenRes.executionId, deviceId, toolId, beforeJson, targetStateJson);
                 if (!backupOk) {
                     std::string response = ResponseBuilder::BuildOptimizationAuditResult(
                         requestId,
@@ -619,18 +674,16 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     break;
                 }
 
-                // Procura GUID de alto desempenho existente ou duplica
-                std::string targetGuid = FindExistingHighPerformanceSchemeGuid();
-                if (targetGuid.empty()) {
-                    targetGuid = DuplicateHighPerformanceScheme();
-                }
-                if (targetGuid.empty() || !IsValidGuid(targetGuid)) {
-                    targetGuid = highPerfBase;
-                }
-
+                // 5. Aplicar
                 bool applied = SetActivePowerScheme(targetGuid);
+
+                // 6. Ler novamente
                 PowerSchemeInfo after = GetActivePowerScheme();
+
+                // 7. Comparar GUID real
                 bool verified = (after.valid && after.guid == targetGuid);
+
+                // 8. Somente então retornar APLICADO!
 
                 auto endTime = std::chrono::steady_clock::now();
                 int64_t dur = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
@@ -963,6 +1016,15 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 #endif
             g_serverInstance->SendTextMessage(clientSock, response);
             Logger::Instance().Info("TELEMETRY_SNAPSHOT dispatched.");
+            break;
+        }
+
+        case MessageType::GET_HARDWARE_INVENTORY: {
+            Logger::Instance().Info("GET_HARDWARE_INVENTORY received (Request ID: " + requestId + ")");
+            std::string inventoryJson = HardwareInventory::getFullInventory();
+            std::string response = ResponseBuilder::BuildHardwareInventoryResult(requestId, inventoryJson);
+            g_serverInstance->SendTextMessage(clientSock, response);
+            Logger::Instance().Info("HARDWARE_INVENTORY_RESULT dispatched.");
             break;
         }
 

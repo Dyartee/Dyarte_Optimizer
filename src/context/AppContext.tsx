@@ -560,9 +560,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
+    // Requirement 9: Central backend authorization before DDU mutation
+    const authRes = await requestExecutionAuthorization('tool_gpu_clean_drivers', device.device_id, 'APPLY');
+    if (!authRes.authorized || !authRes.execution_token || !authRes.execution_id || !authRes.request_id) {
+      const errMsg = authRes.error || 'Autorização negada pelo servidor central para execução do DDU.';
+      addToast('error', 'Autorização Negada', errMsg);
+      setDduStatus('DDU_FAILED');
+      return {
+        status: 'DDU_FAILED',
+        success: false,
+        message: errMsg,
+        error: errMsg,
+      };
+    }
+
+    await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+
     setIsDduRunning(true);
     try {
-      const execResult = await window.dyarte.ddu.executeDdu();
+      const execResult = await window.dyarte.ddu.executeDdu(authRes.execution_token);
       setDduStatus(execResult.status);
 
       if (execResult.status === 'DDU_NOT_FOUND') {
@@ -828,10 +844,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    // Executa o instalador através do DriverService nativo
+    // Requirement 9: Central backend authorization before Driver mutation
+    const toolId = brand === 'AMD' ? 'tool_gpu_amd_driver' : 'tool_gpu_nvidia_driver';
+    const authRes = await requestExecutionAuthorization(toolId, device.device_id, 'APPLY');
+    if (!authRes.authorized || !authRes.execution_token || !authRes.execution_id || !authRes.request_id) {
+      const errorMsg = authRes.error || `Autorização negada pelo servidor para instalação do driver ${brand}.`;
+      setDriverPipeline((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: 'failed',
+              progress: 100,
+              actionText: 'Falha: Operação de driver não autorizada pelo servidor central.',
+              errorMessage: errorMsg,
+              logs: [
+                ...prev.logs,
+                `[BLOQUEIO] Autorização central negada para execução do driver.`,
+                `[DETALHE] ${errorMsg}`,
+              ],
+            }
+          : null
+      );
+      addToast('error', 'Autorização Negada', errorMsg);
+      return {
+        status: 'FAILED',
+        code: 'UNAUTHORIZED_MUTATION',
+        success: false,
+        message: errorMsg,
+      };
+    }
+
+    await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+
+    // Executa o instalador através do DriverService nativo passando o execution token assinado
     let execResult;
     try {
-      execResult = await window.dyarte.drivers.executeDriverInstaller(brand);
+      execResult = await window.dyarte.drivers.executeDriverInstaller(brand, authRes.execution_token);
     } catch (err: any) {
       execResult = {
         success: false,
@@ -1741,6 +1789,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<{
     success: boolean;
     authorized: boolean;
+    execution_id?: string;
+    request_id?: string;
     execution_token?: string;
     expires_at?: number;
     error_code?: string;
@@ -1780,6 +1830,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return {
         success: true,
         authorized: true,
+        execution_id: data.execution_id,
+        request_id: data.request_id,
         execution_token: data.execution_token,
         expires_at: data.expires_at,
       };
@@ -1793,45 +1845,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const recordExecutionResultToBackend = async (payload: {
-    execution_token: string;
-    tool_id: string;
-    status: 'SUCESSO' | 'FALHA' | 'REVERTIDO';
-    verified: boolean;
-    duration_ms: number;
-    result?: string;
-    error?: string;
-    details?: string;
-    before_state?: any;
-    after_state?: any;
-    rollback_available?: boolean;
-    request_id?: string;
-    optimization_id?: string;
-    agent_version?: string;
-    device_id?: string;
-    receipt?: any;
-    receipt_signature?: string;
-    agent_public_key?: string;
-  }): Promise<any> => {
+  /**
+   * Requirement 3: Transiciona execução de ISSUED para EXECUTING no servidor.
+   */
+  const startExecutionOnBackend = async (
+    executionId: string,
+    requestId: string
+  ): Promise<{ success: boolean; error?: string }> => {
     try {
       const token = await auth.currentUser?.getIdToken();
-      if (!token) return null;
-      const res = await fetch('/api/tools/record-result', {
+      if (!token) return { success: false, error: 'Não autenticado' };
+      const res = await fetch('/api/executions/start', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          execution_id: executionId,
+          request_id: requestId,
+        }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        return data.record;
-      }
-    } catch (err) {
-      console.warn('Erro ao sincronizar resultado com backend:', err);
+      const data = await res.json();
+      return { success: res.ok && data.success, error: data.error };
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
-    return null;
+  };
+
+  /**
+   * Requirements 1 & 2: Finaliza a execução no servidor através do recibo assinado pelo Windows Agent.
+   * O backend valida a assinatura Ed25519 e finaliza atomicamente no Firestore.
+   */
+  const completeExecutionOnBackend = async (
+    executionToken: string,
+    receipt: any,
+    receiptSignature?: string
+  ): Promise<{ success: boolean; record?: any; error?: string }> => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) return { success: false, error: 'Não autenticado' };
+      const res = await fetch('/api/executions/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          execution_token: executionToken,
+          receipt,
+          receipt_signature: receiptSignature,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return { success: true, record: data.record };
+      }
+      return { success: false, error: data.error || 'Falha na finalização pelo servidor' };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
   };
 
   // Tool Execution - Strict Authorized Flow (React -> Backend Token -> AgentBridge -> Windows Agent -> Verify -> Official History)
@@ -1918,8 +1991,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 1. Request signed execution token from Backend Authority
-    const authRes = await requestExecutionAuthorization(toolId, device.device_id);
-    if (!authRes.authorized || !authRes.execution_token) {
+    const authRes = await requestExecutionAuthorization(toolId, device.device_id, 'APPLY');
+    if (!authRes.authorized || !authRes.execution_token || !authRes.execution_id || !authRes.request_id) {
       setIsOptimizing(false);
       setActiveOptimizingToolId(null);
       const failMsg = authRes.error || 'Autorização negada pelo servidor central.';
@@ -1927,11 +2000,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: failMsg };
     }
 
-    // 2. Dispatch execution with signed token through OptimizationEngine to Windows Agent
+    // 2. Requirement 3: Transition to EXECUTING state in Backend Execution Registry
+    const startRes = await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+    if (!startRes.success) {
+      setIsOptimizing(false);
+      setActiveOptimizingToolId(null);
+      const failMsg = startRes.error || 'Falha ao registrar início da execução no servidor central.';
+      addToast('error', 'Falha no Registro', failMsg);
+      return { success: false, message: failMsg };
+    }
+
+    // 3. Dispatch execution with signed token and backend request_id through OptimizationEngine to Windows Agent
     const result = await optimizationEngine.applyTool(
       toolId,
       currentUser.nivel_plano,
-      authRes.execution_token
+      authRes.execution_token,
+      authRes.request_id
     );
 
     setIsOptimizing(false);
@@ -1939,49 +2023,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const realDuration = typeof result.durationMs === 'number' ? Math.max(0, result.durationMs) : 0;
 
-    // 3. Strict Verification: only success if executed AND verified by Windows Agent
-    if (!result.success || !result.verified) {
+    // 4. Strict Verification: finalize execution on backend only with valid Agent receipt
+    if (!result.success || !result.verified || !result.receipt) {
       const failMsg = result.error || result.message || 'Falha na execução ou verificação pelo Windows Agent.';
-      await recordExecutionResultToBackend({
-        execution_token: authRes.execution_token,
-        tool_id: tool.tool_id,
-        status: 'FALHA',
-        verified: false,
-        duration_ms: realDuration,
-        result: failMsg,
-        error: result.error || 'Falha na verificação',
-        details: tool.details,
-        before_state: result.beforeState,
-        after_state: result.afterState,
-        rollback_available: false,
-        device_id: device.device_id,
-      });
-
+      if (result.receipt) {
+        await completeExecutionOnBackend(authRes.execution_token, result.receipt, result.receiptSignature);
+      }
       addToast('warning', 'Não Executado pelo Agent', failMsg);
       return { success: false, message: failMsg };
     }
 
-    // 4. Record verified success in official backend history
-    const serverRecord = await recordExecutionResultToBackend({
-      execution_token: authRes.execution_token,
-      tool_id: tool.tool_id,
-      status: 'SUCESSO',
-      verified: true,
-      duration_ms: realDuration,
-      result: result.message || `Otimização aplicada e confirmada pelo Windows Agent: ${tool.nome}.`,
-      details: result.afterState
-        ? `Antes: ${JSON.stringify(result.beforeState)} | Depois: ${JSON.stringify(result.afterState)}`
-        : tool.details,
-      before_state: result.beforeState,
-      after_state: result.afterState,
-      rollback_available: result.rollbackAvailable,
-      device_id: device.device_id,
-      receipt: result.receipt,
-      receipt_signature: result.receiptSignature,
-    });
+    // 5. Finalize verified success in official backend registry and history
+    const completeRes = await completeExecutionOnBackend(
+      authRes.execution_token,
+      result.receipt,
+      result.receiptSignature
+    );
 
-    const historyItem: OptimizationHistoryItem = {
-      history_id: serverRecord?.history_id || `hist_${Date.now()}`,
+    if (!completeRes.success) {
+      const failMsg = completeRes.error || 'Falha ao validar recibo criptográfico no servidor central.';
+      addToast('error', 'Validação Rejeitada', failMsg);
+      return { success: false, message: failMsg };
+    }
+
+    const historyItem: OptimizationHistoryItem = completeRes.record || {
+      history_id: `hist_${Date.now()}`,
       user_id: currentUser.user_id,
       tool_id: tool.tool_id,
       tool_name: tool.nome,
@@ -2061,8 +2127,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let result;
     if (willBeActive) {
-      const authRes = await requestExecutionAuthorization(toolId, device.device_id);
-      if (!authRes.authorized || !authRes.execution_token) {
+      const authRes = await requestExecutionAuthorization(toolId, device.device_id, 'APPLY');
+      if (!authRes.authorized || !authRes.execution_token || !authRes.execution_id || !authRes.request_id) {
         setIsOptimizing(false);
         setActiveOptimizingToolId(null);
         const errText = authRes.error || 'Autorização negada pelo servidor central.';
@@ -2070,27 +2136,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errText, active: currentlyActive };
       }
 
-      result = await optimizationEngine.applyTool(toolId, currentUser.nivel_plano, authRes.execution_token);
-      if (result.success && result.verified) {
-        await recordExecutionResultToBackend({
-          execution_token: authRes.execution_token,
-          tool_id: tool.tool_id,
-          status: 'SUCESSO',
-          verified: true,
-          duration_ms: typeof result.durationMs === 'number' ? Math.max(0, result.durationMs) : 0,
-          result: `Otimização ativada e confirmada pelo Agent: ${getToolName(tool)}.`,
-          details: tool.details,
-          before_state: result.beforeState,
-          after_state: result.afterState,
-          rollback_available: result.rollbackAvailable,
-          device_id: device.device_id,
-          receipt: result.receipt,
-          receipt_signature: result.receiptSignature,
-        });
+      await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+
+      result = await optimizationEngine.applyTool(
+        toolId,
+        currentUser.nivel_plano,
+        authRes.execution_token,
+        authRes.request_id
+      );
+
+      if (result.receipt) {
+        await completeExecutionOnBackend(
+          authRes.execution_token,
+          result.receipt,
+          result.receiptSignature
+        );
       }
     } else {
       const rollbackAuthRes = await requestExecutionAuthorization(toolId, device.device_id, 'ROLLBACK');
-      if (!rollbackAuthRes.authorized || !rollbackAuthRes.execution_token) {
+      if (!rollbackAuthRes.authorized || !rollbackAuthRes.execution_token || !rollbackAuthRes.execution_id || !rollbackAuthRes.request_id) {
         setIsOptimizing(false);
         setActiveOptimizingToolId(null);
         const errText = rollbackAuthRes.error || 'Autorização de reversão negada pelo servidor central.';
@@ -2098,23 +2162,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errText, active: currentlyActive };
       }
 
-      result = await optimizationEngine.rollbackTool(toolId, currentUser.nivel_plano, undefined, rollbackAuthRes.execution_token);
-      if (result.success && result.verified) {
-        await recordExecutionResultToBackend({
-          execution_token: rollbackAuthRes.execution_token,
-          tool_id: tool.tool_id,
-          status: 'REVERTIDO',
-          verified: true,
-          duration_ms: 0,
-          result: `Otimização desativada e confirmada pelo Agent: ${getToolName(tool)}.`,
-          details: 'Configuração padrão do Windows restaurada pelo Agent.',
-          before_state: null,
-          after_state: (result as any).restoredState,
-          rollback_available: false,
-          device_id: device.device_id,
-          receipt: (result as any).receipt,
-          receipt_signature: (result as any).receiptSignature,
-        });
+      await startExecutionOnBackend(rollbackAuthRes.execution_id, rollbackAuthRes.request_id);
+
+      result = await optimizationEngine.rollbackTool(
+        toolId,
+        currentUser.nivel_plano,
+        undefined,
+        rollbackAuthRes.execution_token,
+        rollbackAuthRes.request_id
+      );
+
+      if ((result as any).receipt) {
+        await completeExecutionOnBackend(
+          rollbackAuthRes.execution_token,
+          (result as any).receipt,
+          (result as any).receiptSignature
+        );
       }
     }
 

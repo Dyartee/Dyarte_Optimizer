@@ -121,17 +121,16 @@ export function getServerSigningPrivateKey(): crypto.KeyObject {
     }
   }
 
+  if (rawKeyHex && (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex))) {
+    // If a secret string or passphrase was provided instead of 64 hex characters,
+    // deterministically hash it to a 32-byte (64-hex) Ed25519 private seed
+    rawKeyHex = crypto.createHash('sha256').update(rawKeyHex, 'utf8').digest('hex');
+  }
+
   if (!rawKeyHex) {
     const errorMsg =
       '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
       'O backend requer uma chave privada Ed25519 (64 hex characters) para emitir tokens de execução.';
-    throw new Error(errorMsg);
-  }
-
-  if (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
-    const errorMsg =
-      `[CONFIG_KEY_INVALID] A chave OPTIMIZATION_SIGNING_PRIVATE_KEY possui formato inválido ` +
-      `(esperado: 64 caracteres hexadecimais, recebido: ${rawKeyHex.length} caracteres).`;
     throw new Error(errorMsg);
   }
 
@@ -156,12 +155,18 @@ export function getServerPublicKey(): crypto.KeyObject {
     return cachedPublicKey;
   }
 
-  cachedPublicKey = crypto.createPublicKey({
-    key: Buffer.concat([SPKI_HEADER, Buffer.from(SERVER_ED25519_PUB_HEX, 'hex')]),
-    format: 'der',
-    type: 'spki',
-  });
-  return cachedPublicKey;
+  try {
+    const priv = getServerSigningPrivateKey();
+    cachedPublicKey = crypto.createPublicKey(priv);
+    return cachedPublicKey;
+  } catch {
+    cachedPublicKey = crypto.createPublicKey({
+      key: Buffer.concat([SPKI_HEADER, Buffer.from(SERVER_ED25519_PUB_HEX, 'hex')]),
+      format: 'der',
+      type: 'spki',
+    });
+    return cachedPublicKey;
+  }
 }
 
 /**
@@ -338,7 +343,13 @@ export function verifyOptimizationExecutionToken(
     return { valid: false, error_code: 'DEVICE_MISMATCH', error: `Dispositivo do token ('${payload.device_id}') diverge do dispositivo esperado ('${expectedDeviceId}').` };
   }
 
-  // 6. Request ID and Execution ID matching
+  // 6. Request ID and Execution ID mandatory validation
+  if (!payload.request_id || typeof payload.request_id !== 'string' || payload.request_id.trim() === '') {
+    return { valid: false, error_code: 'INVALID_TOKEN', error: 'request_id ausente ou vazio no token.' };
+  }
+  if (!payload.execution_id || typeof payload.execution_id !== 'string' || payload.execution_id.trim() === '') {
+    return { valid: false, error_code: 'INVALID_TOKEN', error: 'execution_id ausente ou vazio no token.' };
+  }
   if (expectedRequestId && payload.request_id !== expectedRequestId) {
     return { valid: false, error_code: 'RECEIPT_REQUEST_MISMATCH', error: `request_id do token ('${payload.request_id}') diverge do esperado ('${expectedRequestId}').` };
   }

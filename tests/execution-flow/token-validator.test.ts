@@ -86,6 +86,7 @@ async function runTokenValidatorTests() {
   const emptyNonceTok = craftAndSign({
     protocol_version: 1,
     execution_id: 'exec_tv_empty_nonce',
+    request_id: 'req_tv_empty_nonce',
     operation: 'APPLY',
     tool_id: toolId,
     user_id: userId,
@@ -110,6 +111,7 @@ async function runTokenValidatorTests() {
   const futureIatTok = craftAndSign({
     protocol_version: 1,
     execution_id: 'exec_tv_future_iat',
+    request_id: 'req_tv_future_iat',
     operation: 'APPLY',
     tool_id: toolId,
     user_id: userId,
@@ -125,6 +127,7 @@ async function runTokenValidatorTests() {
   const invalidOpTok = craftAndSign({
     protocol_version: 1,
     execution_id: 'exec_tv_bad_op',
+    request_id: 'req_tv_bad_op',
     operation: 'UNKNOWN_OP',
     tool_id: toolId,
     user_id: userId,

@@ -32,6 +32,8 @@ enum class MessageType {
     OPTIMIZATION_RESULT,
     GET_TELEMETRY,
     TELEMETRY_SNAPSHOT,
+    GET_HARDWARE_INVENTORY,
+    HARDWARE_INVENTORY_RESULT,
     EXECUTE_DRIVER_PACKAGE,
     ERROR_RESPONSE
 };
@@ -51,6 +53,8 @@ inline std::string MessageTypeToString(MessageType type) {
         case MessageType::OPTIMIZATION_RESULT: return "OPTIMIZATION_RESULT";
         case MessageType::GET_TELEMETRY: return "GET_TELEMETRY";
         case MessageType::TELEMETRY_SNAPSHOT: return "TELEMETRY_SNAPSHOT";
+        case MessageType::GET_HARDWARE_INVENTORY: return "GET_HARDWARE_INVENTORY";
+        case MessageType::HARDWARE_INVENTORY_RESULT: return "HARDWARE_INVENTORY_RESULT";
         case MessageType::EXECUTE_DRIVER_PACKAGE: return "EXECUTE_DRIVER_PACKAGE";
         case MessageType::ERROR_RESPONSE: return "ERROR";
         default: return "UNKNOWN";
@@ -65,6 +69,7 @@ inline MessageType StringToMessageType(const std::string& str) {
     if (str == "APPLY_OPTIMIZATION") return MessageType::APPLY_OPTIMIZATION;
     if (str == "ROLLBACK_OPTIMIZATION") return MessageType::ROLLBACK_OPTIMIZATION;
     if (str == "GET_TELEMETRY") return MessageType::GET_TELEMETRY;
+    if (str == "GET_HARDWARE_INVENTORY") return MessageType::GET_HARDWARE_INVENTORY;
     if (str == "EXECUTE_DRIVER_PACKAGE") return MessageType::EXECUTE_DRIVER_PACKAGE;
     return MessageType::UNKNOWN;
 }
@@ -265,6 +270,20 @@ public:
            << ",\"gpu\":{\"usage\":" << gpuUsageStr << ",\"temperature\":" << gpuTempStr << ",\"clock_mhz\":" << gpuClockStr << "}"
            << ",\"memory\":{\"usage\":" << ramUsageStr << ",\"used_mb\":" << ramUsedMbStr << ",\"total_mb\":" << ramTotalMbStr << "}"
            << "}}";
+        return ss.str();
+    }
+
+    static std::string BuildHardwareInventoryResult(
+        const std::string& requestId,
+        const std::string& inventoryJson
+    ) {
+        std::stringstream ss;
+        ss << "{\"protocol_version\":1"
+           << ",\"type\":\"HARDWARE_INVENTORY_RESULT\""
+           << ",\"request_id\":\"" << EscapeString(requestId) << "\""
+           << ",\"agent_version\":\"" << ProtocolConstants::AGENT_VERSION << "\""
+           << ",\"inventory\":" << (inventoryJson.empty() ? "{}" : inventoryJson)
+           << "}";
         return ss.str();
     }
 

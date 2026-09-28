@@ -8,7 +8,6 @@
 #include <sstream>
 #include <filesystem>
 #include <iomanip>
-#include <random>
 #include <cstring>
 #include "ed25519_verify.h"
 #include "logger.h"
@@ -17,7 +16,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
 #pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "bcrypt.lib")
 #endif
 
 namespace fs = std::filesystem;
@@ -61,25 +62,102 @@ public:
         return bytes;
     }
 
+    /**
+     * Requirement 6: BCryptGenRandom on Windows, /dev/urandom on POSIX
+     * Replaces std::random_device for cryptographic seeds and nonces
+     */
+    static bool GenerateSecureRandom(uint8_t* out, size_t len) {
+#ifdef _WIN32
+        NTSTATUS status = BCryptGenRandom(NULL, out, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        return BCRYPT_SUCCESS(status);
+#else
+        std::ifstream urandom("/dev/urandom", std::ios::binary);
+        if (urandom.is_open()) {
+            urandom.read(reinterpret_cast<char*>(out), len);
+            return urandom.gcount() == static_cast<std::streamsize>(len);
+        }
+        return false;
+#endif
+    }
+
     static std::string GenerateRandomNonce(size_t bytesCount = 16) {
-        std::vector<uint8_t> buf(bytesCount);
-        std::random_device rd;
-        for (size_t i = 0; i < bytesCount; ++i) {
-            buf[i] = static_cast<uint8_t>(rd() & 0xFF);
+        std::vector<uint8_t> buf(bytesCount, 0);
+        if (!GenerateSecureRandom(buf.data(), bytesCount)) {
+            Logger::Instance().Error("[Security] Failed to generate cryptographically secure random nonce.");
+            return "";
         }
         return ToHex(buf.data(), buf.size());
     }
 
     /**
-     * Initializes Agent Identity (loads or generates Ed25519 identity keypair).
+     * Reads and decrypts private Ed25519 seed from DPAPI.
+     * Requirement 4: Fail-closed.
+     * Returns true only on verified decryption of exactly 32 bytes.
      */
-    static void Initialize() {
-        GetPublicKeyHex();
+    static bool LoadDecryptedPrivateSeed(std::vector<uint8_t>& outSeed32) {
+        outSeed32.assign(32, 0);
+        std::string keyPath = (fs::path(GetAgentDataDirectory()) / "agent_identity.key").string();
+
+        if (!fs::exists(keyPath)) {
+            Logger::Instance().Error("[Security] agent_identity.key does not exist.");
+            return false;
+        }
+
+        std::ifstream ifs(keyPath, std::ios::binary);
+        if (!ifs.is_open()) {
+            Logger::Instance().Error("[Security] Could not open agent_identity.key for reading.");
+            return false;
+        }
+
+        std::vector<uint8_t> cipherBuf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        if (cipherBuf.empty()) {
+            Logger::Instance().Error("[Security] agent_identity.key is empty or corrupt.");
+            return false;
+        }
+
+#ifdef _WIN32
+        DATA_BLOB cipherBlob;
+        cipherBlob.pbData = cipherBuf.data();
+        cipherBlob.cbData = static_cast<DWORD>(cipherBuf.size());
+
+        DATA_BLOB plainBlob;
+        if (!CryptUnprotectData(&cipherBlob, NULL, NULL, NULL, NULL, 0, &plainBlob)) {
+            DWORD err = GetLastError();
+            Logger::Instance().Error("[Security] DPAPI CryptUnprotectData failed with error code: " + std::to_string(err));
+            return false;
+        }
+
+        if (plainBlob.cbData < 32 || plainBlob.pbData == nullptr) {
+            Logger::Instance().Error("[Security] DPAPI decrypted seed invalid length: " + std::to_string(plainBlob.cbData));
+            if (plainBlob.pbData) {
+                SecureZeroMemory(plainBlob.pbData, plainBlob.cbData);
+                LocalFree(plainBlob.pbData);
+            }
+            return false;
+        }
+
+        std::memcpy(outSeed32.data(), plainBlob.pbData, 32);
+        SecureZeroMemory(plainBlob.pbData, plainBlob.cbData);
+        LocalFree(plainBlob.pbData);
+        return true;
+#else
+        if (cipherBuf.size() < 32) {
+            Logger::Instance().Error("[Security] Non-Windows agent_identity.key too short.");
+            return false;
+        }
+        std::memcpy(outSeed32.data(), cipherBuf.data(), 32);
+        return true;
+#endif
     }
 
     /**
-     * Returns the Agent's Ed25519 public key hex string (64 characters).
-     * Derives pk mathematically from seed using Ed25519::KeypairFromSeed (RFC 8032).
+     * Requirement 5: Agent Identity Lifecycle
+     * 1. Gera uma identidade Ed25519 uma única vez;
+     * 2. Armazena private seed protegida por DPAPI;
+     * 3. Deriva public key da private seed;
+     * 4. Compara a public key derivada com agent_public.key;
+     * 5. Bloqueia caso sejam diferentes (Erro: AGENT_IDENTITY_INVALID).
+     * Não confiar cegamente no arquivo agent_public.key.
      */
     static std::string GetPublicKeyHex() {
         static std::string s_agentPubHex = "";
@@ -90,27 +168,64 @@ public:
         std::string keyPath = (fs::path(GetAgentDataDirectory()) / "agent_identity.key").string();
         std::string pubPath = (fs::path(GetAgentDataDirectory()) / "agent_public.key").string();
 
-        if (fs::exists(pubPath)) {
-            std::ifstream ifs(pubPath);
-            std::string line;
-            if (std::getline(ifs, line)) {
-                line.erase(0, line.find_first_not_of(" \t\r\n"));
-                line.erase(line.find_last_not_of(" \t\r\n") + 1);
-                if (line.length() == 64) {
-                    s_agentPubHex = line;
-                    return s_agentPubHex;
+        if (fs::exists(keyPath)) {
+            // Decrypt private seed and derive public key mathematically
+            std::vector<uint8_t> seed(32, 0);
+            if (!LoadDecryptedPrivateSeed(seed)) {
+                Logger::Instance().Error("[Security] AGENT_IDENTITY_INVALID: Failed to decrypt DPAPI private seed from disk.");
+                return "AGENT_IDENTITY_INVALID";
+            }
+
+            uint8_t pk[32];
+            uint8_t sk[64];
+            Ed25519::KeypairFromSeed(pk, sk, seed.data());
+            std::string derivedPubHex = ToHex(pk, 32);
+
+            // Clean sensitive seed and secret key immediately
+#ifdef _WIN32
+            SecureZeroMemory(seed.data(), seed.size());
+            SecureZeroMemory(sk, sizeof(sk));
+#else
+            std::fill(seed.begin(), seed.end(), 0);
+            std::fill(sk, sk + 64, 0);
+#endif
+
+            // Compare derived public key with agent_public.key if it exists
+            if (fs::exists(pubPath)) {
+                std::ifstream ifs(pubPath);
+                std::string filePub;
+                if (std::getline(ifs, filePub)) {
+                    filePub.erase(0, filePub.find_first_not_of(" \t\r\n"));
+                    filePub.erase(filePub.find_last_not_of(" \t\r\n") + 1);
+
+                    // Requirement 5: Compare derived public key with agent_public.key
+                    if (filePub != derivedPubHex) {
+                        Logger::Instance().Error(
+                            "[Security] AGENT_IDENTITY_INVALID: Public key mismatch! File ('" +
+                            filePub + "') does NOT match derived private key ('" + derivedPubHex + "'). Identity compromised."
+                        );
+                        return "AGENT_IDENTITY_INVALID";
+                    }
+                }
+            } else {
+                // If public key file is missing, write derived public key
+                std::ofstream ofs(pubPath);
+                if (ofs.is_open()) {
+                    ofs << derivedPubHex << std::endl;
                 }
             }
+
+            s_agentPubHex = derivedPubHex;
+            return s_agentPubHex;
         }
 
-        // Generate 32 bytes of cryptographically secure random entropy
-        std::vector<uint8_t> seed(32);
-        std::random_device rd;
-        for (size_t i = 0; i < 32; ++i) {
-            seed[i] = static_cast<uint8_t>(rd() & 0xFF);
+        // Key does not exist: Generate Ed25519 identity keypair once
+        std::vector<uint8_t> seed(32, 0);
+        if (!GenerateSecureRandom(seed.data(), 32)) {
+            Logger::Instance().Error("[Security] Failed to generate secure random seed via BCryptGenRandom.");
+            return "AGENT_IDENTITY_INVALID";
         }
 
-        // Real Ed25519 keypair derivation
         uint8_t pk[32];
         uint8_t sk[64];
         Ed25519::KeypairFromSeed(pk, sk, seed.data());
@@ -123,7 +238,7 @@ public:
         }
 
 #ifdef _WIN32
-        // Section 3: Protect private key on Windows using DPAPI (CryptProtectData)
+        // Protect private key on Windows using DPAPI (CryptProtectData)
         DATA_BLOB plainTextBlob;
         plainTextBlob.pbData = seed.data();
         plainTextBlob.cbData = static_cast<DWORD>(seed.size());
@@ -135,16 +250,20 @@ public:
                 kofs.write(reinterpret_cast<const char*>(cipherTextBlob.pbData), cipherTextBlob.cbData);
             }
             LocalFree(cipherTextBlob.pbData);
+        } else {
+            DWORD err = GetLastError();
+            Logger::Instance().Error("[Security] CryptProtectData failed: " + std::to_string(err));
+            s_agentPubHex = "AGENT_IDENTITY_INVALID";
+            return s_agentPubHex;
         }
 #else
-        // On non-Windows development/testing environments, store seed
         std::ofstream kofs(keyPath, std::ios::binary);
         if (kofs.is_open()) {
             kofs.write(reinterpret_cast<const char*>(seed.data()), 32);
         }
 #endif
 
-        // Clean sensitive buffers from memory
+        // Clean sensitive buffers from memory immediately
 #ifdef _WIN32
         SecureZeroMemory(seed.data(), seed.size());
         SecureZeroMemory(sk, sizeof(sk));
@@ -154,6 +273,10 @@ public:
 #endif
 
         return s_agentPubHex;
+    }
+
+    static void Initialize() {
+        GetPublicKeyHex();
     }
 
     /**
@@ -199,38 +322,34 @@ public:
     }
 
     /**
-     * Signs canonical receipt bytes using Agent Ed25519 identity key (RFC 8032 / TweetNaCl).
-     * Returns 64-byte Ed25519 signature as a 128-character hex string.
+     * Requirement 4: Fail-closed Signing.
+     * NUNCA fazer std::vector<uint8_t> seed(32, 0) como fallback de assinatura.
+     * Se:
+     * - chave inexistente
+     * - DPAPI falhar
+     * - descriptografia falhar
+     * - chave corrompida
+     * - tamanho inválido
+     * então: RECEIPT_SIGN_FAILED e NÃO gerar assinatura.
      */
     static std::string SignReceipt(const std::string& canonicalReceiptJson) {
-        std::string keyPath = (fs::path(GetAgentDataDirectory()) / "agent_identity.key").string();
         std::vector<uint8_t> seed(32, 0);
+        if (!LoadDecryptedPrivateSeed(seed)) {
+            Logger::Instance().Error("[Security] RECEIPT_SIGN_FAILED: DPAPI private key could not be loaded/decrypted.");
+            return "RECEIPT_SIGN_FAILED";
+        }
 
-        if (fs::exists(keyPath)) {
-            std::ifstream ifs(keyPath, std::ios::binary);
-            std::vector<uint8_t> cipherBuf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-
-#ifdef _WIN32
-            // Section 3: Decrypt private key using Windows DPAPI (CryptUnprotectData)
-            if (!cipherBuf.empty()) {
-                DATA_BLOB cipherBlob;
-                cipherBlob.pbData = cipherBuf.data();
-                cipherBlob.cbData = static_cast<DWORD>(cipherBuf.size());
-
-                DATA_BLOB plainBlob;
-                if (CryptUnprotectData(&cipherBlob, NULL, NULL, NULL, NULL, 0, &plainBlob)) {
-                    if (plainBlob.cbData >= 32) {
-                        std::memcpy(seed.data(), plainBlob.pbData, 32);
-                    }
-                    SecureZeroMemory(plainBlob.pbData, plainBlob.cbData);
-                    LocalFree(plainBlob.pbData);
-                }
+        // Verify seed is not all zeros
+        bool allZero = true;
+        for (uint8_t b : seed) {
+            if (b != 0) {
+                allZero = false;
+                break;
             }
-#else
-            if (cipherBuf.size() >= 32) {
-                std::memcpy(seed.data(), cipherBuf.data(), 32);
-            }
-#endif
+        }
+        if (allZero) {
+            Logger::Instance().Error("[Security] RECEIPT_SIGN_FAILED: Private seed is all zeros.");
+            return "RECEIPT_SIGN_FAILED";
         }
 
         // Derive secret key and public key
@@ -238,7 +357,7 @@ public:
         uint8_t sk[64];
         Ed25519::KeypairFromSeed(pk, sk, seed.data());
 
-        // Real Ed25519 signature over raw UTF-8 canonical receipt bytes
+        // Ed25519 signature over raw UTF-8 canonical receipt bytes
         uint8_t sig[64];
         Ed25519::Sign(
             sig,

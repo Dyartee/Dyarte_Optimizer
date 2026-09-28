@@ -27,14 +27,14 @@ contextBridge.exposeInMainWorld('dyarte', {
     getDriversPath: () => ipcRenderer.invoke('drivers:get-path'),
     detectGpuVendor: () => ipcRenderer.invoke('drivers:detect-gpu'),
     findDriverInstaller: (vendor) => ipcRenderer.invoke('drivers:find-installer', vendor),
-    executeDriverInstaller: (vendor) => ipcRenderer.invoke('drivers:execute', vendor),
+    executeDriverInstaller: (vendor, executionToken) => ipcRenderer.invoke('drivers:execute', vendor, executionToken),
     getDriverStatus: () => ipcRenderer.invoke('drivers:get-status'),
   },
 
   // Ferramenta DDU (Display Driver Uninstaller) - Execução isolada e segura
   ddu: {
     getDduPath: () => ipcRenderer.invoke('ddu:get-path'),
-    executeDdu: () => ipcRenderer.invoke('ddu:execute'),
+    executeDdu: (executionToken) => ipcRenderer.invoke('ddu:execute', executionToken),
   },
 
   // Informações da aplicação

@@ -227,7 +227,8 @@ export type DriverPipelineEventCode =
   | 'GPU_INCOMPATIBLE'
   | 'DESKTOP_REQUIRED'
   | 'EXECUTION_FAILED'
-  | 'INSTALLATION_CONFIRMED';
+  | 'INSTALLATION_CONFIRMED'
+  | 'UNAUTHORIZED_MUTATION';
 
 export interface DriverPipelineResult {
   status: DriverPipelineStatusCode;
@@ -288,12 +289,12 @@ export interface DyarteElectronAPI {
     getDriversPath: () => Promise<string>;
     detectGpuVendor: () => Promise<GpuDetectionResult>;
     findDriverInstaller: (vendor: 'AMD' | 'NVIDIA') => Promise<DriverInstallerInfo>;
-    executeDriverInstaller: (vendor: 'AMD' | 'NVIDIA') => Promise<DriverExecutionResult>;
+    executeDriverInstaller: (vendor: 'AMD' | 'NVIDIA', executionToken?: string) => Promise<DriverExecutionResult>;
     getDriverStatus: () => Promise<DriverStatusResult>;
   };
   ddu: {
     getDduPath: () => Promise<DduPathResult>;
-    executeDdu: () => Promise<DduExecutionResult>;
+    executeDdu: (executionToken?: string) => Promise<DduExecutionResult>;
   };
   app: {
     getVersion: () => Promise<string>;

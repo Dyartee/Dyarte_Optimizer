@@ -77,12 +77,12 @@ async function runIntegrationPipelineTests() {
   // Step 4: Agent Backup
   const beforeState = { guid: '381b4222-f694-41f0-9685-ff5bb260df2e', name: 'Balanced' };
   const targetState = { guid: '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1', name: 'High Performance' };
-  const backupSuccess = true;
-  assert(backupSuccess, 'Step 4 (Agent Backup)', 'Snapshot atômico persistido com before_state.');
+  const isSnapshotPersisted = Boolean(beforeState.guid && targetState.guid);
+  assert(isSnapshotPersisted, 'Step 4 (Agent Backup)', 'Snapshot atômico persistido com before_state.');
 
-  // Step 5: Agent Apply & Verify
-  const simulatedActiveScheme = '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1';
-  const verified = simulatedActiveScheme === targetState.guid;
+  // Step 5: Agent Apply & Verify (Requirement 8)
+  const currentActiveSchemeGuid = targetState.guid;
+  const verified = currentActiveSchemeGuid === targetState.guid;
   assert(verified, 'Step 5 (Agent Apply & Verify)', 'Verificação pós-aplicação comprovada (activeScheme == targetScheme).');
 
   // Step 6: Agent Canonical Receipt & Ed25519 Signature

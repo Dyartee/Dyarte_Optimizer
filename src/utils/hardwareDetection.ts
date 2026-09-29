@@ -331,7 +331,11 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     windows: hardwareInv?.windows?.os_name || agentStatus?.os || (isAgentOnline ? 'Windows' : 'Windows (Aguardando Agent)'),
     windows_version: hardwareInv?.windows?.edition || hardwareInv?.windows?.major_version || 'N/D',
     build: hardwareInv?.windows?.build ? `Build ${hardwareInv.windows.build}` : 'N/D',
-    device_id: agentStatus?.device_id || existingDevice?.device_id || 'DYARTE-PC-LOCAL',
+    device_id: (agentStatus?.device_id && agentStatus.device_id !== 'N/D')
+      ? agentStatus.device_id
+      : ((existingDevice?.device_id && existingDevice.device_id !== 'N/D' && !existingDevice.device_id.includes('LOCAL'))
+        ? existingDevice.device_id
+        : 'N/D'),
     is_agent_connected: isAgentOnline,
     agent_version: isAgentOnline ? '1.1.0' : 'N/D',
     last_heartbeat: isAgentOnline ? 'Conectado' : 'Desconectado',

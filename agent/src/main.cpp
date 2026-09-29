@@ -474,7 +474,8 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 
         case MessageType::GET_HARDWARE_INVENTORY: {
             Logger::Instance().Info("GET_HARDWARE_INVENTORY received. Request ID: " + requestId);
-            std::string fullInvJson = HardwareInventory::getFullInventory();
+            std::string persistentDeviceId = GetPersistentDeviceId();
+            std::string fullInvJson = HardwareInventory::getFullInventory(persistentDeviceId, ProtocolConstants::AGENT_VERSION);
             std::string response = ResponseBuilder::BuildHardwareInventoryResult(requestId, fullInvJson);
             g_serverInstance->SendTextMessage(clientSock, response);
             Logger::Instance().Info("HARDWARE_INVENTORY_RESULT dispatched.");
@@ -1021,7 +1022,8 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 
         case MessageType::GET_HARDWARE_INVENTORY: {
             Logger::Instance().Info("GET_HARDWARE_INVENTORY received (Request ID: " + requestId + ")");
-            std::string inventoryJson = HardwareInventory::getFullInventory();
+            std::string persistentDeviceId = GetPersistentDeviceId();
+            std::string inventoryJson = HardwareInventory::getFullInventory(persistentDeviceId, ProtocolConstants::AGENT_VERSION);
             std::string response = ResponseBuilder::BuildHardwareInventoryResult(requestId, inventoryJson);
             g_serverInstance->SendTextMessage(clientSock, response);
             Logger::Instance().Info("HARDWARE_INVENTORY_RESULT dispatched.");

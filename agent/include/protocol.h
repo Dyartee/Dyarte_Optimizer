@@ -277,11 +277,15 @@ public:
         const std::string& requestId,
         const std::string& inventoryJson
     ) {
+        auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
         std::stringstream ss;
         ss << "{\"protocol_version\":1"
            << ",\"type\":\"HARDWARE_INVENTORY_RESULT\""
            << ",\"request_id\":\"" << EscapeString(requestId) << "\""
            << ",\"agent_version\":\"" << ProtocolConstants::AGENT_VERSION << "\""
+           << ",\"timestamp\":" << nowSec
            << ",\"inventory\":" << (inventoryJson.empty() ? "{}" : inventoryJson)
            << "}";
         return ss.str();

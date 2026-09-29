@@ -1773,12 +1773,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast('success', 'Hardware Atualizado', 'Especificações salvas com sucesso.');
   };
 
-  // Run hardware auto-detection on first startup if mock specs were in storage
+  // Run hardware auto-detection on startup directly from Windows Agent
   useEffect(() => {
-    const saved = localStorage.getItem('dyarte_device');
-    if (!saved || saved.includes('Ryzen 5 5600') || saved.includes('RTX 3060 12GB')) {
-      detectAndSetRealHardware(true);
-    }
+    detectAndSetRealHardware(true);
   }, []);
 
   // Backend Optimization Execution Authorization & History Helpers

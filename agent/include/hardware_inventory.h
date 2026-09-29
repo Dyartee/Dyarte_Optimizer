@@ -9,6 +9,7 @@
 #include <chrono>
 #include "json_helper.h"
 #include "logger.h"
+#include "process_monitor.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -163,6 +164,7 @@ public:
            << "\"model\":\"" << Escape(model.empty() ? "N/D" : model) << "\","
            << "\"commercial_name\":\"" << Escape(model.empty() ? "N/D" : model) << "\","
            << "\"physical_cores\":" << physicalCores << ","
+           << "\"logical_processors\":" << threads << ","
            << "\"threads\":" << threads << ","
            << "\"architecture\":\"" << arch << "\","
            << "\"current_frequency_mhz\":" << (mhz > 0 ? std::to_string(mhz) : "null") << ","
@@ -623,23 +625,50 @@ public:
     }
 
     /**
+     * Requirement 25: Novo Modelo de Inventário
      * Combined Full Hardware Inventory JSON
      */
-    static std::string getFullInventory() {
+    static std::string getFullInventory(const std::string& deviceId = "", const std::string& agentVersion = "1.1.0") {
+        auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        std::string cpuJson = detectCPU();
+        std::string gpuJson = detectGPU();
+        std::string ramJson = detectRAM();
+        std::string storageJson = detectStorage();
+        std::string moboJson = detectMotherboard();
+        std::string biosJson = detectBIOS();
+        std::string winJson = detectWindows();
+        std::string secJson = detectSecurity();
+        std::string gameJson = detectGamingFeatures();
+        std::string powerJson = detectPowerPlan();
+        std::string tempJson = detectTemperatures();
+        std::string usageJson = detectUsage();
+        std::string activeGameJson = ProcessMonitor::GetActiveGameJson();
+
         std::stringstream ss;
         ss << "{"
-           << "\"cpu\":" << detectCPU() << ","
-           << "\"gpu\":" << detectGPU() << ","
-           << "\"ram\":" << detectRAM() << ","
-           << "\"storage\":" << detectStorage() << ","
-           << "\"motherboard\":" << detectMotherboard() << ","
-           << "\"bios\":" << detectBIOS() << ","
-           << "\"windows\":" << detectWindows() << ","
-           << "\"security\":" << detectSecurity() << ","
-           << "\"gaming_features\":" << detectGamingFeatures() << ","
-           << "\"power_plan\":" << detectPowerPlan() << ","
-           << "\"temperatures\":" << detectTemperatures() << ","
-           << "\"usage\":" << detectUsage()
+           << "\"device_id\":\"" << Escape(deviceId.empty() ? "N/D" : deviceId) << "\","
+           << "\"agent_version\":\"" << Escape(agentVersion) << "\","
+           << "\"timestamp\":" << nowSec << ","
+           << "\"cpu\":" << cpuJson << ","
+           << "\"gpus\":[" << gpuJson << "],"
+           << "\"gpu\":" << gpuJson << ","
+           << "\"memory\":" << ramJson << ","
+           << "\"ram\":" << ramJson << ","
+           << "\"storage\":" << storageJson << ","
+           << "\"motherboard\":" << moboJson << ","
+           << "\"bios\":" << biosJson << ","
+           << "\"windows\":" << winJson << ","
+           << "\"drivers\":{\"gpu\":[" << gpuJson << "]},"
+           << "\"security\":" << secJson << ","
+           << "\"gaming\":" << gameJson << ","
+           << "\"gaming_features\":" << gameJson << ","
+           << "\"power_plan\":" << powerJson << ","
+           << "\"telemetry\":" << usageJson << ","
+           << "\"temperatures\":" << tempJson << ","
+           << "\"usage\":" << usageJson << ","
+           << "\"active_game\":" << activeGameJson
            << "}";
         return ss.str();
     }

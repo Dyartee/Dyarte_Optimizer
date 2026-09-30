@@ -47,8 +47,17 @@ export const OptimizationView: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<ToolCategory | 'TODOS'>('TODOS');
   const [activeFilter, setActiveFilter] = useState<'all' | 'unlocked' | 'locked'>('all');
   const [selectedToolDetails, setSelectedToolDetails] = useState<Tool | null>(null);
+  const [confirmExperimentalTool, setConfirmExperimentalTool] = useState<Tool | null>(null);
   const [gpuSelectedBrand, setGpuSelectedBrand] = useState<'AMD' | 'NVIDIA' | null>(null);
   const [detectedGpuVendor, setDetectedGpuVendor] = useState<'AMD' | 'NVIDIA' | 'UNKNOWN'>('UNKNOWN');
+
+  const handleToggleTool = (targetTool: Tool) => {
+    if (targetTool.risk_level === 'EXPERIMENTAL' && !isToolActive(targetTool.tool_id)) {
+      setConfirmExperimentalTool(targetTool);
+      return;
+    }
+    toggleOptimizationTool(targetTool.tool_id);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -821,7 +830,16 @@ export const OptimizationView: React.FC = () => {
                     <div className="w-10 h-10 rounded-lg bg-[#E00000]/10 border border-[#E00000]/30 flex items-center justify-center text-[#FF3333]">
                       <IconHelper name={tool.icon} className="w-5 h-5" />
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
+                        tool.risk_level === 'EXPERIMENTAL'
+                          ? 'bg-amber-950/60 border border-amber-600/50 text-amber-400'
+                          : tool.risk_level === 'ADVANCED'
+                          ? 'bg-blue-950/60 border border-blue-600/50 text-blue-400'
+                          : 'bg-emerald-950/60 border border-emerald-600/50 text-emerald-400'
+                      }`}>
+                        {tool.risk_level || 'SAFE'}
+                      </span>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-semibold uppercase">
                         {t(`cat_${tool.categoria.toLowerCase()}`) || tool.categoria}
                       </span>
@@ -869,7 +887,7 @@ export const OptimizationView: React.FC = () => {
                       role="switch"
                       aria-checked={isToolActive(tool.tool_id)}
                       disabled={isOptimizing}
-                      onClick={() => toggleOptimizationTool(tool.tool_id)}
+                      onClick={() => handleToggleTool(tool)}
                       className={`relative inline-flex h-7 w-13 shrink-0 cursor-pointer rounded-full border-2 transition-all duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
                         isToolActive(tool.tool_id)
                           ? 'bg-[#E00000] border-[#FF4444] shadow-[0_0_12px_rgba(224,0,0,0.5)]'
@@ -1000,6 +1018,39 @@ export const OptimizationView: React.FC = () => {
                   {t('opt_unlock_btn')}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* EXPERIMENTAL TOOL WARNING MODAL (Requirement 30) */}
+      {confirmExperimentalTool && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-[#121218] border border-amber-600/50 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center gap-3 text-amber-400 mb-3">
+              <AlertTriangle className="w-6 h-6 shrink-0" />
+              <h3 className="text-base font-bold font-mono">Confirmação de Ação Experimental</h3>
+            </div>
+            <p className="text-xs text-zinc-300 leading-relaxed mb-4">
+              A otimização <strong className="text-white font-bold">{getToolName(confirmExperimentalTool)}</strong> possui classificação <span className="text-amber-400 font-bold font-mono">EXPERIMENTAL</span>.
+              Ela altera parâmetros de baixo nível do sistema operacional e requer ação deliberada do usuário. Não possui aplicação automática.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmExperimentalTool(null)}
+                className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-mono text-zinc-300 cursor-pointer"
+              >
+                {t('btn_cancel')}
+              </button>
+              <button
+                onClick={() => {
+                  const tId = confirmExperimentalTool.tool_id;
+                  setConfirmExperimentalTool(null);
+                  toggleOptimizationTool(tId);
+                }}
+                className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-mono font-bold cursor-pointer transition-all"
+              >
+                Confirmar e Aplicar
+              </button>
             </div>
           </div>
         </div>

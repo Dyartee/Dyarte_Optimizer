@@ -385,7 +385,16 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
       });
     }
 
-    const targetOperation: OptimizationOperation = req.body.operation === 'ROLLBACK' ? 'ROLLBACK' : 'APPLY';
+    if (!req.body.operation || (req.body.operation !== 'APPLY' && req.body.operation !== 'ROLLBACK')) {
+      return res.status(400).json({
+        success: false,
+        authorized: false,
+        error_code: 'INVALID_OPERATION',
+        error: "operation é obrigatório e deve ser estritamente 'APPLY' ou 'ROLLBACK'.",
+      });
+    }
+
+    const targetOperation: OptimizationOperation = req.body.operation;
     const executionId = `exec_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     const requestId = `req_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     const expiresAt = Math.floor(Date.now() / 1000) + 60;

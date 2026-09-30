@@ -24,26 +24,27 @@ struct ProcessInfo {
     std::string name;
     std::string path;
     uint64_t workingSetBytes = 0;
-    double cpuPercent = 0.0;
     bool isForeground = false;
+    bool isLauncher = false;
     bool isKnownGame = false;
     std::string gameIdentifier;
 };
 
 /**
- * Requirement 22: ProcessMonitor
+ * Requirement 19: ProcessMonitor
  * Real process enumeration and detection for Windows:
  * - nome
  * - PID
  * - caminho
- * - uso de CPU
  * - memória
  * - processo em foreground
  * - processo de jogo quando detectado
  * 
- * Known games/launchers:
- * FiveM, GTA5, Steam, EpicGamesLauncher, Valorant, CS2, Fortnite, etc.
- * NUNCA afirmar que um jogo está ativo se o processo não existir.
+ * Separação estrita:
+ * - jogo ativo (FiveM, GTA5, Valorant, CS2, Fortnite, etc.)
+ * - launcher (Steam, EpicGamesLauncher, RiotClient, Battle.net, etc.)
+ * - processo comum
+ * Launchers NUNCA são classificados como jogo ativo.
  */
 class ProcessMonitor {
 public:
@@ -60,11 +61,55 @@ public:
         return out;
     }
 
+    static bool IsLauncherProcess(const std::string& exeName, std::string& outLauncherName) {
+        std::string lower = exeName;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+
+        if (lower == "steam.exe" || lower.find("steamwebhelper") != std::string::npos) {
+            outLauncherName = "Steam";
+            return true;
+        }
+        if (lower.find("epicgameslauncher") != std::string::npos) {
+            outLauncherName = "Epic Games Launcher";
+            return true;
+        }
+        if (lower.find("riotclientservices") != std::string::npos) {
+            outLauncherName = "Riot Client";
+            return true;
+        }
+        if (lower.find("battle.net") != std::string::npos) {
+            outLauncherName = "Battle.net Launcher";
+            return true;
+        }
+        if (lower.find("ubisoftconnect") != std::string::npos) {
+            outLauncherName = "Ubisoft Connect";
+            return true;
+        }
+        if (lower.find("galaxyclient") != std::string::npos) {
+            outLauncherName = "GOG Galaxy";
+            return true;
+        }
+        if (lower.find("eadesktop") != std::string::npos || lower.find("origin.exe") != std::string::npos) {
+            outLauncherName = "EA App";
+            return true;
+        }
+        return false;
+    }
+
     static bool IsGameProcess(const std::string& exeName, std::string& outGameTitle) {
         std::string lower = exeName;
         std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
+
+        // Launchers are NOT games
+        std::string dummy;
+        if (IsLauncherProcess(exeName, dummy)) {
+            outGameTitle = "";
+            return false;
+        }
 
         if (lower.find("fivem") != std::string::npos) {
             outGameTitle = "FiveM";
@@ -90,15 +135,7 @@ public:
             outGameTitle = "Apex Legends";
             return true;
         }
-        if (lower.find("steam.exe") != std::string::npos) {
-            outGameTitle = "Steam";
-            return true;
-        }
-        if (lower.find("epicgameslauncher") != std::string::npos) {
-            outGameTitle = "Epic Games Launcher";
-            return true;
-        }
-        if (lower.find("leagueclient") != std::string::npos || lower.find("league of legends") != std::string::npos) {
+        if (lower.find("league of legends") != std::string::npos || lower == "leagueclientux.exe") {
             outGameTitle = "League of Legends";
             return true;
         }
@@ -139,18 +176,21 @@ public:
                 std::wstring wName(pe32.szExeFile);
                 std::string exeName(wName.begin(), wName.end());
 
+                std::string launcherName;
+                bool isLauncher = IsLauncherProcess(exeName, launcherName);
                 std::string gameTitle;
                 bool isGame = IsGameProcess(exeName, gameTitle);
                 bool isFg = (pe32.th32ProcessID == fgPid);
 
-                // Collect games, foreground process, or all if requested
-                if (includeAll || isGame || isFg) {
+                // Collect games, launchers, foreground process, or all if requested
+                if (includeAll || isGame || isLauncher || isFg) {
                     ProcessInfo info;
                     info.pid = pe32.th32ProcessID;
                     info.name = exeName;
                     info.isForeground = isFg;
+                    info.isLauncher = isLauncher;
                     info.isKnownGame = isGame;
-                    info.gameIdentifier = gameTitle;
+                    info.gameIdentifier = isGame ? gameTitle : (isLauncher ? launcherName : "");
 
                     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
                     if (hProc) {
@@ -182,7 +222,8 @@ public:
     static std::string GetActiveGameJson() {
         std::vector<ProcessInfo> procs = GetRunningProcesses(false);
         for (const auto& p : procs) {
-            if (p.isKnownGame) {
+            // Strictly real games, not launchers
+            if (p.isKnownGame && !p.isLauncher) {
                 std::stringstream ss;
                 ss << "{"
                    << "\"pid\":" << p.pid << ","
@@ -209,6 +250,7 @@ public:
                << "\"pid\":" << procs[i].pid << ","
                << "\"name\":\"" << Escape(procs[i].name) << "\","
                << "\"is_game\":" << (procs[i].isKnownGame ? "true" : "false") << ","
+               << "\"is_launcher\":" << (procs[i].isLauncher ? "true" : "false") << ","
                << "\"game_title\":\"" << Escape(procs[i].gameIdentifier) << "\","
                << "\"is_foreground\":" << (procs[i].isForeground ? "true" : "false") << ","
                << "\"memory_mb\":" << (procs[i].workingSetBytes / (1024 * 1024))

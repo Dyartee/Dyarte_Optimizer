@@ -601,6 +601,26 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                         "JA_APLICADO", true, beforeJson, afterJson, true, dur, ProtocolConstants::AGENT_VERSION, nowSec, receiptNonce
                     );
                     std::string receiptSig = AgentIdentity::SignReceipt(canonicalReceipt);
+                    bool signSuccess = !receiptSig.empty() && receiptSig != "RECEIPT_SIGN_FAILED";
+                    if (!signSuccess) {
+                        std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                            requestId,
+                            toolId,
+                            "FALHA",
+                            false,
+                            false,
+                            beforeJson,
+                            afterJson,
+                            false,
+                            dur,
+                            "RECEIPT_SIGN_FAILED: Falha na assinatura criptografica do recibo pelo Agent.",
+                            "Falha ao assinar digitalmente o recibo pelo Agent.",
+                            "RECEIPT_SIGN_FAILED"
+                        );
+                        g_serverInstance->SendTextMessage(clientSock, response);
+                        Logger::Instance().Error("tool_perf_power_plan receipt signing failed for JA_APLICADO.");
+                        break;
+                    }
 
                     std::string response = ResponseBuilder::BuildOptimizationAuditResult(
                         requestId,
@@ -699,6 +719,27 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     verified ? "APLICADO" : "FALHA", verified, beforeJson, afterJson, true, dur, ProtocolConstants::AGENT_VERSION, nowSec, receiptNonce
                 );
                 std::string receiptSig = AgentIdentity::SignReceipt(canonicalReceipt);
+                bool signSuccess = !receiptSig.empty() && receiptSig != "RECEIPT_SIGN_FAILED";
+                if (!signSuccess) {
+                    verified = false;
+                    std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                        requestId,
+                        toolId,
+                        "FALHA",
+                        false,
+                        false,
+                        beforeJson,
+                        afterJson,
+                        false,
+                        dur,
+                        "RECEIPT_SIGN_FAILED: Falha na assinatura criptografica do recibo pelo Agent.",
+                        "Falha ao assinar digitalmente o recibo pelo Agent.",
+                        "RECEIPT_SIGN_FAILED"
+                    );
+                    g_serverInstance->SendTextMessage(clientSock, response);
+                    Logger::Instance().Error("tool_perf_power_plan receipt signing failed.");
+                    break;
+                }
 
                 if (verified) {
                     std::string response = ResponseBuilder::BuildOptimizationAuditResult(
@@ -872,6 +913,27 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     verified ? "REVERTIDO" : "FALHA", verified, beforeCurrJson, afterJson, false, dur, ProtocolConstants::AGENT_VERSION, nowSec, receiptNonce
                 );
                 std::string receiptSig = AgentIdentity::SignReceipt(canonicalReceipt);
+                bool signSuccess = !receiptSig.empty() && receiptSig != "RECEIPT_SIGN_FAILED";
+                if (!signSuccess) {
+                    verified = false;
+                    std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                        requestId,
+                        toolId,
+                        "FALHA",
+                        false,
+                        false,
+                        beforeCurrJson,
+                        afterJson,
+                        false,
+                        dur,
+                        "RECEIPT_SIGN_FAILED: Falha na assinatura criptografica do recibo pelo Agent.",
+                        "Falha ao assinar digitalmente o recibo pelo Agent.",
+                        "RECEIPT_SIGN_FAILED"
+                    );
+                    g_serverInstance->SendTextMessage(clientSock, response);
+                    Logger::Instance().Error("tool_perf_power_plan rollback receipt signing failed.");
+                    break;
+                }
 
                 if (verified) {
                     std::string response = ResponseBuilder::BuildOptimizationAuditResult(
@@ -1017,16 +1079,6 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 #endif
             g_serverInstance->SendTextMessage(clientSock, response);
             Logger::Instance().Info("TELEMETRY_SNAPSHOT dispatched.");
-            break;
-        }
-
-        case MessageType::GET_HARDWARE_INVENTORY: {
-            Logger::Instance().Info("GET_HARDWARE_INVENTORY received (Request ID: " + requestId + ")");
-            std::string persistentDeviceId = GetPersistentDeviceId();
-            std::string inventoryJson = HardwareInventory::getFullInventory(persistentDeviceId, ProtocolConstants::AGENT_VERSION);
-            std::string response = ResponseBuilder::BuildHardwareInventoryResult(requestId, inventoryJson);
-            g_serverInstance->SendTextMessage(clientSock, response);
-            Logger::Instance().Info("HARDWARE_INVENTORY_RESULT dispatched.");
             break;
         }
 

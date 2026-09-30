@@ -82,6 +82,48 @@ public:
         return get(key).get_bool(def);
     }
 
+    JsonValue get_field(const std::string& key) const {
+        return get(key);
+    }
+
+    std::string to_json() const {
+        if (is_null()) return "null";
+        if (is_bool()) return boolVal ? "true" : "false";
+        if (is_number()) {
+            if (numVal == static_cast<int64_t>(numVal)) {
+                return std::to_string(static_cast<int64_t>(numVal));
+            }
+            return std::to_string(numVal);
+        }
+        if (is_string()) {
+            std::stringstream ss;
+            ss << "\"";
+            for (char c : strVal) {
+                if (c == '"') ss << "\\\"";
+                else if (c == '\\') ss << "\\\\";
+                else if (c == '\n') ss << "\\n";
+                else if (c == '\r') ss << "\\r";
+                else if (c == '\t') ss << "\\t";
+                else ss << c;
+            }
+            ss << "\"";
+            return ss.str();
+        }
+        if (is_object()) {
+            std::stringstream ss;
+            ss << "{";
+            bool first = true;
+            for (const auto& kv : objVal) {
+                if (!first) ss << ",";
+                first = false;
+                ss << "\"" << kv.first << "\":" << kv.second.to_json();
+            }
+            ss << "}";
+            return ss.str();
+        }
+        return "null";
+    }
+
     static JsonValue parse(const std::string& input) {
         JsonValue val;
         JsonParser::Parse(input, val);

@@ -9,6 +9,7 @@ import {
   TelemetrySnapshot,
   OptimizationToolState,
 } from './telemetryTypes';
+import { HardwareInventory } from '../types';
 
 let globalRequestSeq = 0;
 function generateRequestId(prefix: string): string {
@@ -378,7 +379,7 @@ class AgentBridgeService {
    */
   public async getHardwareInventory(timeoutMs = 8000): Promise<{
     success: boolean;
-    inventory?: any;
+    inventory?: HardwareInventory;
     error?: string;
   }> {
     if (this.connectionState !== 'AGENT_ONLINE' || !this.socket || this.socket.readyState !== WebSocket.OPEN) {

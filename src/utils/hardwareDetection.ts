@@ -245,17 +245,28 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
 
   // RAM REAL
   let verifiedRam: string | null = null;
-  if (typeof hardwareInv?.ram?.total_gb === 'number' && hardwareInv.ram.total_gb > 0) {
-    verifiedRam = `${hardwareInv.ram.total_gb} GB RAM`;
+  const ramTotalMb = typeof hardwareInv?.ram?.total_mb === 'number'
+    ? hardwareInv.ram.total_mb
+    : (typeof hardwareInv?.memory?.total_mb === 'number' ? hardwareInv.memory.total_mb : null);
+
+  if (ramTotalMb && ramTotalMb > 0) {
+    const gb = Math.round((ramTotalMb / 1024) * 10) / 10;
+    verifiedRam = `${gb} GB RAM`;
   } else if (isAgentOnline && agentStatus?.ram && agentStatus.ram !== 'N/D') {
     verifiedRam = agentStatus.ram;
   }
 
-  // STORAGE REAL
+  // STORAGE REAL (Disks and Volumes)
   let verifiedStorage: string | null = null;
-  if (Array.isArray(hardwareInv?.storage?.devices) && hardwareInv.storage.devices.length > 0) {
-    const primaryDisk = hardwareInv.storage.devices.find((d: any) => d.is_system_disk) || hardwareInv.storage.devices[0];
-    verifiedStorage = `${primaryDisk.model || primaryDisk.manufacturer || 'Disco'} (${primaryDisk.capacity_gb || 'N/D'} GB ${primaryDisk.type || ''})`.trim();
+  if (Array.isArray(hardwareInv?.storage?.disks) && hardwareInv.storage.disks.length > 0) {
+    const primaryDisk = hardwareInv.storage.disks.find((d: any) => d.is_system) || hardwareInv.storage.disks[0];
+    const diskModel = primaryDisk.model && primaryDisk.model !== 'N/D' ? primaryDisk.model : (primaryDisk.manufacturer && primaryDisk.manufacturer !== 'N/D' ? primaryDisk.manufacturer : 'Disco');
+    const diskType = primaryDisk.media_type && primaryDisk.media_type !== 'N/D' ? ` ${primaryDisk.media_type}` : '';
+    const diskCap = primaryDisk.size_gb > 0 ? ` (${primaryDisk.size_gb} GB${diskType})` : '';
+    verifiedStorage = `${diskModel}${diskCap}`.trim();
+  } else if (Array.isArray(hardwareInv?.storage?.volumes) && hardwareInv.storage.volumes.length > 0) {
+    const primaryVol = hardwareInv.storage.volumes.find((v: any) => v.is_system) || hardwareInv.storage.volumes[0];
+    verifiedStorage = `Volume ${primaryVol.drive} (${primaryVol.total_gb || 'N/D'} GB)`;
   } else if (isAgentOnline && agentStatus?.storage && agentStatus.storage !== 'N/D') {
     verifiedStorage = agentStatus.storage;
   }
@@ -282,20 +293,32 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     verifiedSecureBoot = agentStatus.secure_boot;
   }
 
-  // RESIZABLE BAR REAL (SUPPORTED, ENABLED, DISABLED, UNKNOWN)
+  // RESIZABLE BAR REAL (SUPPORTED, ENABLED, DISABLED, N/D, null)
   let verifiedRebar: boolean | null = null;
-  if (hardwareInv?.resizable_bar?.status === 'ENABLED') {
+  const rebarStatus = hardwareInv?.gaming?.resizable_bar || hardwareInv?.gaming_features?.resizable_bar;
+  if (rebarStatus === 'ENABLED') {
     verifiedRebar = true;
-  } else if (hardwareInv?.resizable_bar?.status === 'DISABLED') {
+  } else if (rebarStatus === 'DISABLED') {
     verifiedRebar = false;
   }
 
   // XMP / EXPO REAL
-  const verifiedXmp = hardwareInv?.xmp_expo?.status && hardwareInv.xmp_expo.status !== 'UNKNOWN' && hardwareInv.xmp_expo.status !== 'N/D'
-    ? hardwareInv.xmp_expo.status
+  const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo;
+  const verifiedXmp = xmpStatus && xmpStatus !== 'UNKNOWN' && xmpStatus !== 'N/D'
+    ? xmpStatus
     : null;
 
+  // AGENT VERSION REAL (Requirement 21: Never hardcode '1.1.0')
+  const detectedAgentVersion = hardwareInv?.agent_version && hardwareInv.agent_version !== 'N/D'
+    ? hardwareInv.agent_version
+    : (agentStatus?.agent_version && agentStatus.agent_version !== 'N/D' ? agentStatus.agent_version : 'N/D');
+
   const offlineLabel = 'Aguardando dados do Agent';
+
+  const ramUsedMb = typeof hardwareInv?.ram?.used_mb === 'number' ? hardwareInv.ram.used_mb : null;
+  const vramTotalMb = typeof hardwareInv?.gpu?.vram_mb === 'number' ? hardwareInv.gpu.vram_mb : null;
+  const cpuTemp = typeof hardwareInv?.temperatures?.cpu_c === 'number' ? hardwareInv.temperatures.cpu_c : null;
+  const gpuTemp = typeof hardwareInv?.temperatures?.gpu_c === 'number' ? hardwareInv.temperatures.gpu_c : null;
 
   return {
     cpu: verifiedCpu || (isAgentOnline ? 'Não reportado pelo Agent' : offlineLabel),
@@ -309,40 +332,40 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     secure_boot: verifiedSecureBoot,
     xmp_profile: verifiedXmp,
     input_lag_ms: null,
-    ram_frequency: hardwareInv?.ram?.modules?.[0]?.configured_speed_mhz ? `${hardwareInv.ram.modules[0].configured_speed_mhz} MHz` : null,
+    ram_frequency: hardwareInv?.ram?.modules?.[0]?.speed_mhz ? `${hardwareInv.ram.modules[0].speed_mhz} MHz` : null,
     gpu_clock_mhz: null,
     cpu_clock_mhz: typeof hardwareInv?.cpu?.current_frequency_mhz === 'number' ? hardwareInv.cpu.current_frequency_mhz : null,
     cpu_power_w: null,
-    cpu_temperature: typeof hardwareInv?.temperatures?.cpu_temp_c === 'number' ? hardwareInv.temperatures.cpu_temp_c : null,
-    gpu_temperature: typeof hardwareInv?.temperatures?.gpu_temp_c === 'number' ? hardwareInv.temperatures.gpu_temp_c : null,
+    cpu_temperature: cpuTemp,
+    gpu_temperature: gpuTemp,
     gpu_power_w: null,
     gpu_memory_used_mb: null,
-    gpu_memory_total_mb: hardwareInv?.gpu?.vram_gb ? hardwareInv.gpu.vram_gb * 1024 : null,
-    ram_used_mb: hardwareInv?.ram?.used_gb ? Math.round(hardwareInv.ram.used_gb * 1024) : null,
-    ram_total_mb: hardwareInv?.ram?.total_gb ? Math.round(hardwareInv.ram.total_gb * 1024) : null,
+    gpu_memory_total_mb: vramTotalMb,
+    ram_used_mb: ramUsedMb,
+    ram_total_mb: ramTotalMb,
     fps: null,
     frametime_ms: null,
     gpu_latency_ms: null,
     active_process: null,
-    active_game_pid: null,
-    active_game_name: null,
+    active_game_pid: hardwareInv?.active_game?.pid || null,
+    active_game_name: hardwareInv?.active_game?.title || hardwareInv?.active_game?.name || null,
     driver_version: hardwareInv?.gpu?.driver_version && hardwareInv.gpu.driver_version !== 'N/D' ? hardwareInv.gpu.driver_version : null,
     windows_license: null,
-    windows: hardwareInv?.windows?.os_name || agentStatus?.os || (isAgentOnline ? 'Windows' : 'Windows (Aguardando Agent)'),
-    windows_version: hardwareInv?.windows?.edition || hardwareInv?.windows?.major_version || 'N/D',
-    build: hardwareInv?.windows?.build ? `Build ${hardwareInv.windows.build}` : 'N/D',
+    windows: hardwareInv?.windows?.product_name || agentStatus?.os || (isAgentOnline ? 'Windows' : 'Windows (Aguardando Agent)'),
+    windows_version: hardwareInv?.windows?.edition || hardwareInv?.windows?.version || 'N/D',
+    build: hardwareInv?.windows?.build && hardwareInv.windows.build !== 'N/D' ? `Build ${hardwareInv.windows.build}` : 'N/D',
     device_id: (agentStatus?.device_id && agentStatus.device_id !== 'N/D')
       ? agentStatus.device_id
       : ((existingDevice?.device_id && existingDevice.device_id !== 'N/D' && !existingDevice.device_id.includes('LOCAL'))
         ? existingDevice.device_id
         : 'N/D'),
     is_agent_connected: isAgentOnline,
-    agent_version: isAgentOnline ? '1.1.0' : 'N/D',
+    agent_version: detectedAgentVersion,
     last_heartbeat: isAgentOnline ? 'Conectado' : 'Desconectado',
-    cpu_usage_pct: typeof hardwareInv?.usage?.cpu_percent === 'number' ? hardwareInv.usage.cpu_percent : null,
-    gpu_usage_pct: typeof hardwareInv?.usage?.gpu_percent === 'number' ? hardwareInv.usage.gpu_percent : null,
+    cpu_usage_pct: typeof hardwareInv?.usage?.cpu_percent === 'number' ? hardwareInv.usage.cpu_percent : (typeof hardwareInv?.telemetry?.cpu_percent === 'number' ? hardwareInv.telemetry.cpu_percent : null),
+    gpu_usage_pct: typeof hardwareInv?.usage?.gpu_percent === 'number' ? hardwareInv.usage.gpu_percent : (typeof hardwareInv?.telemetry?.gpu_percent === 'number' ? hardwareInv.telemetry.gpu_percent : null),
     ram_usage_pct: typeof hardwareInv?.ram?.usage_percent === 'number' ? hardwareInv.ram.usage_percent : (typeof hardwareInv?.usage?.ram_percent === 'number' ? hardwareInv.usage.ram_percent : null),
-    temp_c: typeof hardwareInv?.temperatures?.cpu_temp_c === 'number' ? hardwareInv.temperatures.cpu_temp_c : null,
+    temp_c: cpuTemp,
     ping_ms: pingMs,
   };
 }

@@ -319,10 +319,35 @@ public:
 
         return s_agentPubHex;
     }
-    }
 
     static void Initialize() {
         GetPublicKeyHex();
+    }
+
+    /**
+     * Requirement 4: Escapes arbitrary strings for canonical JSON serialization
+     */
+    static std::string EscapeJsonString(const std::string& input) {
+        std::stringstream ss;
+        for (char c : input) {
+            switch (c) {
+                case '"': ss << "\\\""; break;
+                case '\\': ss << "\\\\"; break;
+                case '\b': ss << "\\b"; break;
+                case '\f': ss << "\\f"; break;
+                case '\n': ss << "\\n"; break;
+                case '\r': ss << "\\r"; break;
+                case '\t': ss << "\\t"; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20) {
+                        ss << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(static_cast<unsigned char>(c));
+                    } else {
+                        ss << c;
+                    }
+                    break;
+            }
+        }
+        return ss.str();
     }
 
     /**
@@ -347,21 +372,21 @@ public:
     ) {
         std::stringstream ss;
         ss << "{"
-           << "\"agent_version\":\"" << (agentVersion.empty() ? "1.1.0" : agentVersion) << "\""
+           << "\"agent_version\":\"" << EscapeJsonString(agentVersion.empty() ? "1.1.0" : agentVersion) << "\""
            << ",\"after_state\":" << (afterStateJson.empty() ? "null" : afterStateJson)
            << ",\"before_state\":" << (beforeStateJson.empty() ? "null" : beforeStateJson)
-           << ",\"device_id\":\"" << deviceId << "\""
+           << ",\"device_id\":\"" << EscapeJsonString(deviceId) << "\""
            << ",\"duration_ms\":" << (durationMs < 0 ? 0 : durationMs)
-           << ",\"execution_id\":\"" << executionId << "\""
-           << ",\"operation\":\"" << operation << "\""
+           << ",\"execution_id\":\"" << EscapeJsonString(executionId) << "\""
+           << ",\"operation\":\"" << EscapeJsonString(operation) << "\""
            << ",\"protocol_version\":1"
-           << ",\"receipt_nonce\":\"" << receiptNonce << "\""
-           << ",\"request_id\":\"" << requestId << "\""
+           << ",\"receipt_nonce\":\"" << EscapeJsonString(receiptNonce) << "\""
+           << ",\"request_id\":\"" << EscapeJsonString(requestId) << "\""
            << ",\"rollback_available\":" << (rollbackAvailable ? "true" : "false")
-           << ",\"status\":\"" << status << "\""
+           << ",\"status\":\"" << EscapeJsonString(status) << "\""
            << ",\"timestamp\":" << timestampSec
-           << ",\"tool_id\":\"" << toolId << "\""
-           << ",\"user_id\":\"" << userId << "\""
+           << ",\"tool_id\":\"" << EscapeJsonString(toolId) << "\""
+           << ",\"user_id\":\"" << EscapeJsonString(userId) << "\""
            << ",\"verified\":" << (verified ? "true" : "false")
            << "}";
         return ss.str();

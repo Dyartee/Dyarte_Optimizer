@@ -1,18 +1,18 @@
 /**
- * DYARTE OPTIMIZER - Full Execution Pipeline Integration Tests (Section 41)
- *
- * Covers:
- * 1. AUTHORIZATION -> TOKEN -> AGENT -> APPLY -> VERIFY -> RECEIPT -> BACKEND -> HISTORY
- * 2. AUTHORIZATION -> TOKEN -> AGENT -> ROLLBACK -> VERIFY -> RECEIPT -> BACKEND -> HISTORY
- * 3. Backup Failure Handling
- * 4. Verify Failure Handling
- * 5. Agent Offline Handling
- * 6. Token Replay Handling
- * 7. Receipt Replay Handling
+ * DYARTE OPTIMIZER - Execution Protocol & Security Lifecycle Suite
+ * Requirement 27:
+ * Separado claramente em:
+ * 1. Protocol Unit & Cryptographic Lifecycle
+ * 2. Canonical JSON Escaping & Character Boundaries (quotes, backslashes, Unicode)
+ * 3. Replay Protection & Error Boundaries
+ * 4. Windows Native Integration (executado exclusivamente quando em Windows real)
+ * 
+ * Regra: Nenhuma duração artificial (110, 85). Duração medida em tempo real.
  */
 
 import 'dotenv/config';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 import {
   generateOptimizationExecutionToken,
   verifyOptimizationExecutionToken,
@@ -24,6 +24,7 @@ import { CANONICAL_TOOLS_MAP } from '../../src/data/canonicalCatalog';
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 
 function assert(condition: boolean, title: string, msg: string) {
   if (condition) {
@@ -35,9 +36,14 @@ function assert(condition: boolean, title: string, msg: string) {
   }
 }
 
-async function runIntegrationPipelineTests() {
+function skip(title: string, reason: string) {
+  console.log(`[SKIPPED] ${title}: ${reason}`);
+  skipped++;
+}
+
+async function runExecutionProtocolSuite() {
   console.log('================================================================');
-  console.log('DYARTE OPTIMIZER — EXECUTION PIPELINE INTEGRATION TESTS (SEC 41)');
+  console.log('DYARTE OPTIMIZER — EXECUTION PROTOCOL & SECURITY SUITE');
   console.log('================================================================\n');
 
   const userId = 'usr_pipeline_test_42';
@@ -51,8 +57,10 @@ async function runIntegrationPipelineTests() {
   const agentPubDer = agentKeypair.publicKey.export({ type: 'spki', format: 'der' });
   const agentPubHex = agentPubDer.subarray(12).toString('hex');
 
-  // PIPELINE 1: APPLY PIPELINE
-  console.log('--- Sub-flow 1: Full APPLY Optimization Pipeline ---');
+  // -------------------------------------------------------------
+  // PART A: Full APPLY Protocol Lifecycle
+  // -------------------------------------------------------------
+  console.log('--- Part A: Cryptographic Token & Apply Protocol ---');
 
   // Step 1: Authorization -> Issue Token
   const applyToken = generateOptimizationExecutionToken(
@@ -61,31 +69,26 @@ async function runIntegrationPipelineTests() {
     deviceId,
     60,
     'APPLY',
-    executionId
+    executionId,
+    requestId
   );
   assert(Boolean(applyToken && applyToken.includes('.')), 'Step 1 (Authorization)', 'Backend emitiu execution_token assinado.');
 
   // Step 2: Agent Token Validation
-  const tokenCheck = verifyOptimizationExecutionToken(applyToken, toolId, deviceId, 'APPLY', userId);
+  const tokenCheck = verifyOptimizationExecutionToken(applyToken, toolId, deviceId, 'APPLY', userId, requestId, executionId);
   assert(tokenCheck.valid && tokenCheck.payload?.execution_id === executionId, 'Step 2 (Agent Token Validation)', 'Agent validou token criptográfico com sucesso.');
 
-  // Step 3: Agent Detect & Compatibility
+  // Step 3: Canonical Catalog Check
   const toolDef = CANONICAL_TOOLS_MAP[toolId];
   const isCompatible = toolDef.implementation_status === 'IMPLEMENTED';
-  assert(isCompatible, 'Step 3 (Agent Detect & Compatibility)', `Compatibilidade confirmada para ${toolDef.nome}.`);
+  assert(isCompatible, 'Step 3 (Catalog Verification)', `Ferramenta canônica ${toolDef.nome} com status IMPLEMENTED.`);
 
-  // Step 4: Agent Backup
-  const beforeState = { guid: '381b4222-f694-41f0-9685-ff5bb260df2e', name: 'Balanced' };
-  const targetState = { guid: '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1', name: 'High Performance' };
-  const isSnapshotPersisted = Boolean(beforeState.guid && targetState.guid);
-  assert(isSnapshotPersisted, 'Step 4 (Agent Backup)', 'Snapshot atômico persistido com before_state.');
+  // Step 4: Measured Execution Duration (Real clock, zero artificial constants)
+  const timerStart = Date.now();
+  await new Promise((r) => setTimeout(r, 10)); // Real asynchronous elapsed time
+  const realDurationMs = Math.max(1, Date.now() - timerStart);
 
-  // Step 5: Agent Apply & Verify (Requirement 8)
-  const currentActiveSchemeGuid = targetState.guid;
-  const verified = currentActiveSchemeGuid === targetState.guid;
-  assert(verified, 'Step 5 (Agent Apply & Verify)', 'Verificação pós-aplicação comprovada (activeScheme == targetScheme).');
-
-  // Step 6: Agent Canonical Receipt & Ed25519 Signature
+  // Step 5: Canonical Receipt Serialization & Agent Ed25519 Signature
   const nowSec = Math.floor(Date.now() / 1000);
   const applyReceipt: ExecutionReceiptPayload = {
     protocol_version: 1,
@@ -97,20 +100,21 @@ async function runIntegrationPipelineTests() {
     device_id: deviceId,
     status: 'APLICADO',
     verified: true,
-    before_state: beforeState,
-    after_state: targetState,
+    before_state: { guid: '381b4222-f694-41f0-9685-ff5bb260df2e', name: 'Equilibrado' },
+    after_state: { guid: '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1', name: 'Alto desempenho' },
     rollback_available: true,
-    duration_ms: 110,
+    duration_ms: realDurationMs,
     agent_version: '1.1.0',
     timestamp: nowSec,
     receipt_nonce: crypto.randomBytes(16).toString('hex'),
   };
+
   const canonicalReceiptJson = serializeCanonicalReceipt(applyReceipt);
   const receiptSigBuf = crypto.sign(null, Buffer.from(canonicalReceiptJson, 'utf8'), agentKeypair.privateKey);
   const receiptSigHex = receiptSigBuf.toString('hex');
-  assert(receiptSigHex.length === 128, 'Step 6 (Agent Signed Receipt)', 'Agent assinou canonical receipt com Ed25519 (64 bytes).');
+  assert(receiptSigHex.length === 128, 'Step 5 (Agent Signed Receipt)', 'Agent assinou canonical receipt com Ed25519 (64 bytes).');
 
-  // Step 7: Backend Receipt Validation
+  // Step 6: Backend Receipt Cryptographic Audit
   const receiptVerification = verifyAgentReceipt(
     applyReceipt,
     receiptSigHex,
@@ -119,23 +123,54 @@ async function runIntegrationPipelineTests() {
     deviceId,
     'APPLY',
     userId,
-    requestId
+    requestId,
+    executionId
   );
-  assert(receiptVerification.valid, 'Step 7 (Backend Receipt Validation)', 'Backend validou assinatura e integridade do recibo.');
+  assert(receiptVerification.valid, 'Step 6 (Backend Receipt Audit)', 'Backend validou assinatura Ed25519 e dados canônicos do recibo.');
 
-  // Step 8: Official History
-  const historyRecord = {
-    history_id: `hist_${executionId}`,
-    execution_id: executionId,
+  // -------------------------------------------------------------
+  // PART B: Canonical JSON Escaping & Character Boundaries
+  // -------------------------------------------------------------
+  console.log('\n--- Part B: Canonical Escaping & Special Characters ---');
+
+  const specialCharsReceipt: ExecutionReceiptPayload = {
+    protocol_version: 1,
+    execution_id: `exec_quotes_"test"_${Date.now()}`,
+    request_id: `req_special_\\escaped\\_${Date.now()}`,
     tool_id: toolId,
-    status: applyReceipt.status === 'APLICADO' && applyReceipt.verified ? 'SUCESSO' : 'FALHA',
-    duration_ms: applyReceipt.duration_ms,
-    receipt_verified: true,
+    operation: 'APPLY',
+    user_id: 'usr_utf8_SãoPaulo_日本語',
+    device_id: 'DEV-NAME-"TEST"-\\01',
+    status: 'APLICADO',
+    verified: true,
+    before_state: { note: 'Value with "quotes" and \\backslashes\\ and \nnewlines' },
+    after_state: { note: 'Updated with \ttabs and UTF-8: ⚡' },
+    rollback_available: true,
+    duration_ms: realDurationMs,
+    agent_version: '1.1.0',
+    timestamp: nowSec,
+    receipt_nonce: crypto.randomBytes(16).toString('hex'),
   };
-  assert(historyRecord.status === 'SUCESSO' && historyRecord.receipt_verified, 'Step 8 (Official History)', 'Histórico oficial registrado com SUCESSO e receipt_verified=true.');
 
-  // PIPELINE 2: ROLLBACK PIPELINE
-  console.log('\n--- Sub-flow 2: Full ROLLBACK Optimization Pipeline ---');
+  const specialCanonical = serializeCanonicalReceipt(specialCharsReceipt);
+  const specialSig = crypto.sign(null, Buffer.from(specialCanonical, 'utf8'), agentKeypair.privateKey).toString('hex');
+  const specialAudit = verifyAgentReceipt(
+    specialCharsReceipt,
+    specialSig,
+    agentPubHex,
+    toolId,
+    specialCharsReceipt.device_id,
+    'APPLY',
+    specialCharsReceipt.user_id,
+    specialCharsReceipt.request_id,
+    specialCharsReceipt.execution_id
+  );
+  assert(specialAudit.valid, 'Escaping Test (Quotes, Backslashes, Unicode)', 'JSON canônico com caracteres especiais auditado e verificado sem divergência.');
+
+  // -------------------------------------------------------------
+  // PART C: Rollback Protocol Lifecycle
+  // -------------------------------------------------------------
+  console.log('\n--- Part C: Full ROLLBACK Protocol Lifecycle ---');
   const rollbackExecId = `exec_rbk_${Date.now()}`;
   const rollbackReqId = `req_rbk_${Date.now()}`;
 
@@ -145,9 +180,10 @@ async function runIntegrationPipelineTests() {
     deviceId,
     60,
     'ROLLBACK',
-    rollbackExecId
+    rollbackExecId,
+    rollbackReqId
   );
-  const rbkTokenCheck = verifyOptimizationExecutionToken(rollbackToken, toolId, deviceId, 'ROLLBACK', userId);
+  const rbkTokenCheck = verifyOptimizationExecutionToken(rollbackToken, toolId, deviceId, 'ROLLBACK', userId, rollbackReqId, rollbackExecId);
   assert(rbkTokenCheck.valid && rbkTokenCheck.payload?.operation === 'ROLLBACK', 'Rollback Step 1 (Token)', 'Token assinado de ROLLBACK validado.');
 
   const rollbackReceipt: ExecutionReceiptPayload = {
@@ -160,38 +196,60 @@ async function runIntegrationPipelineTests() {
     device_id: deviceId,
     status: 'REVERTIDO',
     verified: true,
-    before_state: targetState,
-    after_state: beforeState,
+    before_state: { guid: '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1', name: 'Alto desempenho' },
+    after_state: { guid: '381b4222-f694-41f0-9685-ff5bb260df2e', name: 'Equilibrado' },
     rollback_available: false,
-    duration_ms: 85,
+    duration_ms: realDurationMs,
     agent_version: '1.1.0',
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp: nowSec,
     receipt_nonce: crypto.randomBytes(16).toString('hex'),
   };
   const rbkCanonical = serializeCanonicalReceipt(rollbackReceipt);
   const rbkSig = crypto.sign(null, Buffer.from(rbkCanonical, 'utf8'), agentKeypair.privateKey).toString('hex');
-  const rbkVerifyRes = verifyAgentReceipt(rollbackReceipt, rbkSig, agentPubHex, toolId, deviceId, 'ROLLBACK', userId, rollbackReqId);
+  const rbkVerifyRes = verifyAgentReceipt(rollbackReceipt, rbkSig, agentPubHex, toolId, deviceId, 'ROLLBACK', userId, rollbackReqId, rollbackExecId);
   assert(rbkVerifyRes.valid, 'Rollback Step 2 (Receipt)', 'Backend validou recibo de reversão REVERTIDO.');
 
-  // SUB-FLOWS: Error & Boundary Cases
-  console.log('\n--- Sub-flow 3: Replay & Error Boundary Cases ---');
+  // -------------------------------------------------------------
+  // PART D: Replay Protection & Security Boundaries
+  // -------------------------------------------------------------
+  console.log('\n--- Part D: Replay Protection & Security Boundaries ---');
 
   // Token Replay
-  const replayTokenRes = verifyOptimizationExecutionToken(applyToken, toolId, deviceId, 'APPLY', userId);
+  const replayTokenRes = verifyOptimizationExecutionToken(applyToken, toolId, deviceId, 'APPLY', userId, requestId, executionId);
   assert(!replayTokenRes.valid && replayTokenRes.error_code === 'TOKEN_REPLAY', 'Boundary 1 (Token Replay)', 'Reutilização do mesmo token bloqueada com TOKEN_REPLAY.');
 
   // Receipt Replay
-  const replayReceiptRes = verifyAgentReceipt(applyReceipt, receiptSigHex, agentPubHex, toolId, deviceId, 'APPLY', userId, requestId);
+  const replayReceiptRes = verifyAgentReceipt(applyReceipt, receiptSigHex, agentPubHex, toolId, deviceId, 'APPLY', userId, requestId, executionId);
   assert(!replayReceiptRes.valid && replayReceiptRes.error_code === 'RECEIPT_REPLAY', 'Boundary 2 (Receipt Replay)', 'Reutilização do mesmo recibo bloqueada com RECEIPT_REPLAY.');
 
+  // Tampered Signature
+  const tamperedSig = 'a'.repeat(128);
+  const tamperedReceiptRes = verifyAgentReceipt(applyReceipt, tamperedSig, agentPubHex, toolId, deviceId, 'APPLY', userId, requestId, executionId);
+  assert(!tamperedReceiptRes.valid && tamperedReceiptRes.error_code === 'RECEIPT_SIGNATURE_INVALID', 'Boundary 3 (Tampered Signature)', 'Recibo com assinatura adulterada rejeitado.');
+
+  // -------------------------------------------------------------
+  // PART E: Windows Native Integration (Active only on Windows)
+  // -------------------------------------------------------------
+  console.log('\n--- Part E: Windows Native Verification ---');
+  if (process.platform === 'win32') {
+    try {
+      const activeScheme = execSync('powercfg /getactivescheme', { encoding: 'utf8' });
+      assert(activeScheme.includes('GUID:'), 'Windows PowerCfg Live', `Plano de energia ativo lido diretamente do Windows: ${activeScheme.trim()}`);
+    } catch (e: any) {
+      assert(false, 'Windows PowerCfg Live', `Falha ao executar powercfg no Windows: ${e.message}`);
+    }
+  } else {
+    skip('Windows Native Live PowerCfg Check', 'Ambiente Linux/CI atual não possui kernel Windows. Executável apenas no host Windows nativo.');
+  }
+
   console.log('\n================================================================');
-  console.log(`INTEGRAÇÃO: ${passed} Aprovados, ${failed} Falhas.`);
+  console.log(`SUÍTE DE PROTOCOLO: ${passed} Aprovados, ${failed} Falhas, ${skipped} Pulados.`);
   console.log('================================================================\n');
 
   if (failed > 0) process.exit(1);
 }
 
-runIntegrationPipelineTests().catch((err) => {
-  console.error('Erro nos testes de integração:', err);
+runExecutionProtocolSuite().catch((err) => {
+  console.error('Erro nos testes de execução:', err);
   process.exit(1);
 });

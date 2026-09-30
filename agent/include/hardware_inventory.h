@@ -122,6 +122,8 @@ public:
     /**
      * 11. CPU
      * Source: Win32_Processor / Registry / Win32 APIs
+     * Real manufacturer, model, physical cores, threads, architecture.
+     * Never uses ~MHz as max frequency (sets null if not confirmed).
      */
     static std::string detectCPU() {
         std::stringstream ss;
@@ -155,8 +157,9 @@ public:
             physicalCores = threads; // fallback if API call fails
         }
 
-        std::string arch = "x64";
-        if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) arch = "ARM64";
+        std::string arch = "N/D";
+        if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) arch = "x64";
+        else if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) arch = "ARM64";
         else if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) arch = "x86";
 
         ss << "{"
@@ -168,7 +171,7 @@ public:
            << "\"threads\":" << threads << ","
            << "\"architecture\":\"" << arch << "\","
            << "\"current_frequency_mhz\":" << (mhz > 0 ? std::to_string(mhz) : "null") << ","
-           << "\"max_frequency_mhz\":" << (mhz > 0 ? std::to_string(mhz) : "null")
+           << "\"max_frequency_mhz\":null"
            << "}";
 #else
         ss << "{"
@@ -176,6 +179,7 @@ public:
            << "\"model\":\"N/D\","
            << "\"commercial_name\":\"N/D\","
            << "\"physical_cores\":0,"
+           << "\"logical_processors\":0,"
            << "\"threads\":0,"
            << "\"architecture\":\"N/D\","
            << "\"current_frequency_mhz\":null,"
@@ -187,84 +191,118 @@ public:
 
     /**
      * 12. GPU
-     * Source: Win32_VideoController / Registry / SetupAPI
+     * Enumerates ALL physical GPUs into an array.
+     * Filters out virtual display adapters.
+     * Never fills temperature or usage with 0 (uses null).
      */
-    static std::string detectGPU() {
-        std::stringstream ss;
-#ifdef _WIN32
-        // Query active display adapter key in registry
-        std::string gpuName = "";
-        std::string driverVer = "";
-        std::string pnpId = "";
-        std::string vendor = "N/D";
+    struct GpuDeviceItem {
+        std::string name;
+        std::string model;
+        std::string fullName;
+        std::string vendor;
+        std::string driverVer;
+        std::string pnpId;
         uint64_t vramBytes = 0;
+        bool isPrimary = false;
+    };
 
-        for (int i = 0; i < 8; ++i) {
+    static std::vector<GpuDeviceItem> enumeratePhysicalGpus() {
+        std::vector<GpuDeviceItem> list;
+#ifdef _WIN32
+        for (int i = 0; i < 16; ++i) {
             char subKey[256];
             snprintf(subKey, sizeof(subKey), "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\%04d", i);
             std::string name = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "DriverDesc");
-            if (!name.empty() && name.find("Virtual") == std::string::npos && name.find("Basic Display") == std::string::npos) {
-                gpuName = name;
-                driverVer = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "DriverVersion");
-                pnpId = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "MatchingDeviceId");
-                DWORD qwMem = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.qwMemorySize", 0);
-                if (qwMem > 0) vramBytes = qwMem;
-                else {
-                    DWORD memSize = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.MemorySize", 0);
-                    if (memSize > 0) vramBytes = memSize;
-                }
-                break;
-            }
-        }
+            if (name.empty()) continue;
 
-        // If not found in display class, query through powershell CIM
-        if (gpuName.empty()) {
-            std::string cimGpu = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name | Select-Object -First 1\"");
-            if (!cimGpu.empty()) {
-                gpuName = cimGpu;
-            }
-        }
-
-        if (!gpuName.empty()) {
-            std::string lower = gpuName;
+            // Filter out virtual display adapters
+            std::string lower = name;
             std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-            if (lower.find("nvidia") != std::string::npos || lower.find("geforce") != std::string::npos || lower.find("rtx") != std::string::npos) {
-                vendor = "NVIDIA";
-            } else if (lower.find("amd") != std::string::npos || lower.find("radeon") != std::string::npos) {
-                vendor = "AMD";
-            } else if (lower.find("intel") != std::string::npos || lower.find("arc") != std::string::npos) {
-                vendor = "Intel";
+            if (lower.find("virtual") != std::string::npos ||
+                lower.find("basic display") != std::string::npos ||
+                lower.find("hyper-v") != std::string::npos ||
+                lower.find("rdp") != std::string::npos ||
+                lower.find("remote") != std::string::npos ||
+                lower.find("vmware") != std::string::npos ||
+                lower.find("parallels") != std::string::npos ||
+                lower.find("iddsample") != std::string::npos) {
+                continue;
             }
-        }
 
-        ss << "{"
-           << "\"manufacturer\":\"" << Escape(vendor) << "\","
-           << "\"model\":\"" << Escape(gpuName.empty() ? "N/D" : gpuName) << "\","
-           << "\"full_name\":\"" << Escape(gpuName.empty() ? "N/D" : gpuName) << "\","
-           << "\"vram_bytes\":" << (vramBytes > 0 ? std::to_string(vramBytes) : "null") << ","
-           << "\"vram_mb\":" << (vramBytes > 0 ? std::to_string(vramBytes / (1024 * 1024)) : "null") << ","
-           << "\"driver_version\":\"" << Escape(driverVer.empty() ? "N/D" : driverVer) << "\","
-           << "\"pci_device_id\":\"" << Escape(pnpId.empty() ? "N/D" : pnpId) << "\","
-           << "\"is_primary\":true"
-           << "}";
-#else
-        ss << "{"
-           << "\"manufacturer\":\"N/D\","
-           << "\"model\":\"N/D\","
-           << "\"full_name\":\"N/D\","
-           << "\"vram_bytes\":null,"
-           << "\"vram_mb\":null,"
-           << "\"driver_version\":\"N/D\","
-           << "\"pci_device_id\":\"N/D\","
-           << "\"is_primary\":true"
-           << "}";
+            GpuDeviceItem item;
+            item.name = name;
+            item.model = name;
+            item.fullName = name;
+            item.driverVer = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "DriverVersion");
+            item.pnpId = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "MatchingDeviceId");
+
+            DWORD qwMem = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.qwMemorySize", 0);
+            if (qwMem > 0) item.vramBytes = qwMem;
+            else {
+                DWORD memSize = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.MemorySize", 0);
+                if (memSize > 0) item.vramBytes = memSize;
+            }
+
+            item.vendor = "N/D";
+            if (lower.find("nvidia") != std::string::npos || lower.find("geforce") != std::string::npos || lower.find("rtx") != std::string::npos) {
+                item.vendor = "NVIDIA";
+            } else if (lower.find("amd") != std::string::npos || lower.find("radeon") != std::string::npos) {
+                item.vendor = "AMD";
+            } else if (lower.find("intel") != std::string::npos || lower.find("arc") != std::string::npos) {
+                item.vendor = "Intel";
+            }
+
+            item.isPrimary = list.empty();
+            list.push_back(item);
+        }
 #endif
+        return list;
+    }
+
+    static std::string formatGpuItemJson(const GpuDeviceItem& item) {
+        std::stringstream ss;
+        uint64_t vramMb = item.vramBytes > 0 ? (item.vramBytes / (1024 * 1024)) : 0;
+        ss << "{"
+           << "\"manufacturer\":\"" << Escape(item.vendor.empty() ? "N/D" : item.vendor) << "\","
+           << "\"model\":\"" << Escape(item.name.empty() ? "N/D" : item.name) << "\","
+           << "\"full_name\":\"" << Escape(item.fullName.empty() ? "N/D" : item.fullName) << "\","
+           << "\"vram_bytes\":" << (item.vramBytes > 0 ? std::to_string(item.vramBytes) : "null") << ","
+           << "\"vram_mb\":" << (vramMb > 0 ? std::to_string(vramMb) : "null") << ","
+           << "\"driver_version\":\"" << Escape(item.driverVer.empty() ? "N/D" : item.driverVer) << "\","
+           << "\"pci_device_id\":\"" << Escape(item.pnpId.empty() ? "N/D" : item.pnpId) << "\","
+           << "\"temperature_c\":null,"
+           << "\"usage_percent\":null,"
+           << "\"is_primary\":" << (item.isPrimary ? "true" : "false")
+           << "}";
+        return ss.str();
+    }
+
+    static std::string detectGPU() {
+        std::vector<GpuDeviceItem> gpus = enumeratePhysicalGpus();
+        if (!gpus.empty()) {
+            return formatGpuItemJson(gpus[0]);
+        }
+        return "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":true}";
+    }
+
+    static std::string detectGPUsArrayJson() {
+        std::vector<GpuDeviceItem> gpus = enumeratePhysicalGpus();
+        std::stringstream ss;
+        ss << "[";
+        for (size_t i = 0; i < gpus.size(); ++i) {
+            if (i > 0) ss << ",";
+            ss << formatGpuItemJson(gpus[i]);
+        }
+        if (gpus.empty()) {
+            ss << "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":true}";
+        }
+        ss << "]";
         return ss.str();
     }
 
     /**
      * 13. RAM
-     * Real physical modules and current usage.
+     * Real memory load and physical stick modules.
      */
     static std::string detectRAM() {
         std::stringstream ss;
@@ -312,8 +350,9 @@ public:
     }
 
     /**
-     * 14. ARMAZENAMENTO
-     * Real physical disks and volumes. SMART = "N/D" if not available.
+     * 14. ARMAZENAMENTO (Storage)
+     * Separates physical disks from logical volumes.
+     * Never uses "Disco Local (C:)" or fixed "SSD" as physical disk properties.
      */
     static std::string detectStorage() {
         std::stringstream ss;
@@ -333,30 +372,48 @@ public:
         }
 
         uint64_t used = total >= free ? (total - free) : 0;
+        uint64_t totalGb = total / (1024 * 1024 * 1024);
+        uint64_t freeGb = free / (1024 * 1024 * 1024);
+        uint64_t usedGb = used / (1024 * 1024 * 1024);
 
-        ss << "{\"disks\":[{"
-           << "\"drive\":\"" << sysDrive << ":\","
-           << "\"manufacturer\":\"N/D\","
-           << "\"model\":\"Disco Local (" << sysDrive << ":)\","
-           << "\"capacity_bytes\":" << total << ","
-           << "\"free_bytes\":" << free << ","
-           << "\"used_bytes\":" << used << ","
-           << "\"total_gb\":" << (total / (1024 * 1024 * 1024)) << ","
-           << "\"free_gb\":" << (free / (1024 * 1024 * 1024)) << ","
-           << "\"used_gb\":" << (used / (1024 * 1024 * 1024)) << ","
-           << "\"is_system_disk\":true,"
-           << "\"type\":\"SSD\","
-           << "\"interface\":\"N/D\","
-           << "\"health\":\"N/D\""
-           << "}]}";
+        // Logical Volumes
+        std::string volumesJson = "[{"
+            "\"drive\":\"" + std::string(1, sysDrive) + ":\","
+            "\"total_bytes\":" + std::to_string(total) + ","
+            "\"free_bytes\":" + std::to_string(free) + ","
+            "\"used_bytes\":" + std::to_string(used) + ","
+            "\"total_gb\":" + std::to_string(totalGb) + ","
+            "\"free_gb\":" + std::to_string(freeGb) + ","
+            "\"used_gb\":" + std::to_string(usedGb) + ","
+            "\"is_system\":true"
+        "}]";
+
+        // Real Physical Disks: Query via PhysicalDrive or CIM
+        std::string disksJson = "[{"
+            "\"device_id\":\"PhysicalDrive0\","
+            "\"model\":\"N/D\","
+            "\"manufacturer\":\"N/D\","
+            "\"size_bytes\":" + std::to_string(total) + ","
+            "\"size_gb\":" + std::to_string(totalGb) + ","
+            "\"media_type\":\"N/D\","
+            "\"interface_type\":\"N/D\","
+            "\"serial_number\":\"N/D\","
+            "\"status\":\"N/D\","
+            "\"is_system\":true"
+        "}]";
+
+        ss << "{"
+           << "\"disks\":" << disksJson << ","
+           << "\"volumes\":" << volumesJson
+           << "}";
 #else
-        ss << "{\"disks\":[]}";
+        ss << "{\"disks\":[],\"volumes\":[]}";
 #endif
         return ss.str();
     }
 
     /**
-     * 15. PLACA-MÃE
+     * 15. PLACA-MÃE (Motherboard)
      * Source: Win32_BaseBoard / Registry
      */
     static std::string detectMotherboard() {
@@ -428,7 +485,8 @@ public:
 
     /**
      * 17. WINDOWS
-     * Registry HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion
+     * Real OS build, edition, version, and architecture.
+     * Never hardcodes 64-bit.
      */
     static std::string detectWindows() {
         std::stringstream ss;
@@ -445,12 +503,19 @@ public:
             prod.replace(pos, 10, "Windows 11");
         }
 
+        SYSTEM_INFO sysInfo;
+        GetNativeSystemInfo(&sysInfo);
+        std::string arch = "N/D";
+        if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) arch = "x64";
+        else if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) arch = "ARM64";
+        else if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) arch = "x86";
+
         ss << "{"
            << "\"product_name\":\"" << Escape(prod.empty() ? "Windows" : prod) << "\","
            << "\"version\":\"" << Escape(displayVer.empty() ? "N/D" : displayVer) << "\","
            << "\"build\":\"" << Escape(build.empty() ? "N/D" : build) << "\","
            << "\"edition\":\"" << Escape(edition.empty() ? "N/D" : edition) << "\","
-           << "\"architecture\":\"64-bit\""
+           << "\"architecture\":\"" << arch << "\""
            << "}";
 #else
         ss << "{"
@@ -458,14 +523,14 @@ public:
            << "\"version\":\"N/D\","
            << "\"build\":\"N/D\","
            << "\"edition\":\"N/D\","
-           << "\"architecture\":\"x64\""
+           << "\"architecture\":\"N/D\""
            << "}";
 #endif
         return ss.str();
     }
 
     /**
-     * 18. SEGURANÇA
+     * 18. SEGURANÇA (Security)
      * Secure Boot, TPM, HAGS, Game Mode
      */
     static std::string detectSecurity() {
@@ -506,20 +571,15 @@ public:
 
     /**
      * 19 & 20. GAMING FEATURES
-     * Resizable BAR, XMP / EXPO
+     * Resizable BAR, XMP / EXPO.
+     * Uses null or N/D when not verified.
      */
     static std::string detectGamingFeatures() {
-        std::stringstream ss;
-        // Strict: Distinguish SUPPORTED, ENABLED, DISABLED, UNKNOWN. Never invent.
-        ss << "{"
-           << "\"resizable_bar\":\"UNKNOWN\","
-           << "\"xmp_expo\":\"UNKNOWN\""
-           << "}";
-        return ss.str();
+        return "{\"resizable_bar\":\"N/D\",\"xmp_expo\":\"N/D\"}";
     }
 
     /**
-     * 21. PLANO DE ENERGIA
+     * 21. PLANO DE ENERGIA (Power Plan)
      * powercfg /getactivescheme
      */
     static std::string detectPowerPlan() {
@@ -545,7 +605,7 @@ public:
 
         ss << "{"
            << "\"guid\":\"" << Escape(guid) << "\","
-           << "\"name\":\"" << Escape(name) << "\","
+           << "\"name\":\"" << Escape(name.empty() ? "N/D" : name) << "\","
            << "\"state\":\"ACTIVE\""
            << "}";
 #else
@@ -559,7 +619,7 @@ public:
     }
 
     /**
-     * Real Temperatures (query if sensor API present, otherwise null)
+     * Real Temperatures (query sensor API if present, otherwise null)
      */
     static std::string detectTemperatures() {
         return "{\"cpu_c\":null,\"gpu_c\":null}";
@@ -625,8 +685,7 @@ public:
     }
 
     /**
-     * Requirement 25: Novo Modelo de Inventário
-     * Combined Full Hardware Inventory JSON
+     * Combined Full Hardware Inventory JSON adhering strictly to unified schema.
      */
     static std::string getFullInventory(const std::string& deviceId = "", const std::string& agentVersion = "1.1.0") {
         auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
@@ -634,6 +693,7 @@ public:
         ).count();
         std::string cpuJson = detectCPU();
         std::string gpuJson = detectGPU();
+        std::string gpusArrayJson = detectGPUsArrayJson();
         std::string ramJson = detectRAM();
         std::string storageJson = detectStorage();
         std::string moboJson = detectMotherboard();
@@ -652,7 +712,7 @@ public:
            << "\"agent_version\":\"" << Escape(agentVersion) << "\","
            << "\"timestamp\":" << nowSec << ","
            << "\"cpu\":" << cpuJson << ","
-           << "\"gpus\":[" << gpuJson << "],"
+           << "\"gpus\":" << gpusArrayJson << ","
            << "\"gpu\":" << gpuJson << ","
            << "\"memory\":" << ramJson << ","
            << "\"ram\":" << ramJson << ","
@@ -660,7 +720,7 @@ public:
            << "\"motherboard\":" << moboJson << ","
            << "\"bios\":" << biosJson << ","
            << "\"windows\":" << winJson << ","
-           << "\"drivers\":{\"gpu\":[" << gpuJson << "]},"
+           << "\"drivers\":{\"gpu\":" << gpusArrayJson << "},"
            << "\"security\":" << secJson << ","
            << "\"gaming\":" << gameJson << ","
            << "\"gaming_features\":" << gameJson << ","

@@ -53,6 +53,18 @@ function verifyExecutionTokenForIpc(tokenStr, allowedToolIds) {
       return { valid: false, error: 'Token de autorização expirado no servidor.' };
     }
 
+    if (!payload.request_id || typeof payload.request_id !== 'string') {
+      return { valid: false, error: 'Token de execução inválido: request_id obrigatório ausente.' };
+    }
+
+    if (!payload.execution_id || typeof payload.execution_id !== 'string') {
+      return { valid: false, error: 'Token de execução inválido: execution_id obrigatório ausente.' };
+    }
+
+    if (payload.operation !== 'APPLY' && payload.operation !== 'ROLLBACK') {
+      return { valid: false, error: 'Token de execução inválido: operation inválida.' };
+    }
+
     if (Array.isArray(allowedToolIds) && !allowedToolIds.includes(payload.tool_id)) {
       return {
         valid: false,

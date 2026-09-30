@@ -308,3 +308,169 @@ declare global {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hardware Inventory Unified Canonical Schema (matches Agent JSON exactly)
+// ---------------------------------------------------------------------------
+
+export interface HardwareCpuInfo {
+  manufacturer: string;
+  model: string;
+  commercial_name: string;
+  physical_cores: number;
+  logical_processors: number;
+  threads: number;
+  architecture: string;
+  current_frequency_mhz: number | null;
+  max_frequency_mhz: number | null;
+}
+
+export interface HardwareGpuItem {
+  manufacturer: string;
+  model: string;
+  full_name: string;
+  vram_bytes: number | null;
+  vram_mb: number | null;
+  driver_version: string;
+  pci_device_id: string;
+  temperature_c: number | null;
+  usage_percent: number | null;
+  is_primary: boolean;
+}
+
+export interface HardwareRamModule {
+  slot?: string;
+  capacity_bytes?: number;
+  capacity_mb?: number;
+  manufacturer?: string;
+  part_number?: string;
+  speed_mhz?: number | null;
+  type?: string;
+}
+
+export interface HardwareRamInfo {
+  total_bytes: number;
+  total_mb: number;
+  used_bytes: number;
+  used_mb: number;
+  available_bytes: number;
+  available_mb: number;
+  usage_percent: number;
+  modules: HardwareRamModule[];
+}
+
+export interface HardwarePhysicalDisk {
+  device_id: string;
+  model: string;
+  manufacturer: string;
+  size_bytes: number;
+  size_gb: number;
+  media_type: string;
+  interface_type: string;
+  serial_number: string;
+  status: string;
+  is_system: boolean;
+}
+
+export interface HardwareVolume {
+  drive: string;
+  total_bytes: number;
+  free_bytes: number;
+  used_bytes: number;
+  total_gb: number;
+  free_gb: number;
+  used_gb: number;
+  is_system: boolean;
+}
+
+export interface HardwareStorageInfo {
+  disks: HardwarePhysicalDisk[];
+  volumes: HardwareVolume[];
+}
+
+export interface HardwareMotherboardInfo {
+  manufacturer: string;
+  model: string;
+  product_name: string;
+  version: string;
+  chipset: string;
+}
+
+export interface HardwareBiosInfo {
+  vendor: string;
+  version: string;
+  release_date: string;
+  mode: 'UEFI' | 'Legacy' | 'UNKNOWN';
+}
+
+export interface HardwareWindowsInfo {
+  product_name: string;
+  version: string;
+  build: string;
+  edition: string;
+  architecture: string;
+}
+
+export interface HardwareSecurityInfo {
+  secure_boot: boolean | null;
+  tpm_present: boolean | null;
+  tpm_ready: boolean | null;
+  tpm_version: string | null;
+  hags: 'ENABLED' | 'DISABLED' | 'N/D' | null;
+  game_mode: 'ENABLED' | 'DISABLED' | 'N/D' | null;
+}
+
+export interface HardwareGamingFeaturesInfo {
+  resizable_bar: 'SUPPORTED' | 'ENABLED' | 'DISABLED' | 'N/D' | null;
+  xmp_expo: 'ENABLED' | 'DISABLED' | 'N/D' | null;
+}
+
+export interface HardwarePowerPlanInfo {
+  guid: string;
+  name: string;
+  state: 'ACTIVE' | 'UNKNOWN';
+}
+
+export interface HardwareTelemetryUsage {
+  cpu_percent: number | null;
+  ram_percent: number | null;
+  gpu_percent: number | null;
+}
+
+export interface HardwareTemperatures {
+  cpu_c: number | null;
+  gpu_c: number | null;
+}
+
+export interface HardwareActiveGame {
+  pid: number;
+  name: string;
+  title: string;
+  path: string;
+  is_foreground: boolean;
+  memory_mb: number;
+}
+
+export interface HardwareInventory {
+  device_id: string;
+  agent_version: string;
+  timestamp: number;
+  cpu: HardwareCpuInfo;
+  gpus: HardwareGpuItem[];
+  gpu: HardwareGpuItem;
+  memory: HardwareRamInfo;
+  ram: HardwareRamInfo;
+  storage: HardwareStorageInfo;
+  motherboard: HardwareMotherboardInfo;
+  bios: HardwareBiosInfo;
+  windows: HardwareWindowsInfo;
+  security: HardwareSecurityInfo;
+  gaming: HardwareGamingFeaturesInfo;
+  gaming_features: HardwareGamingFeaturesInfo;
+  power_plan: HardwarePowerPlanInfo;
+  telemetry: HardwareTelemetryUsage;
+  temperatures: HardwareTemperatures;
+  usage: HardwareTelemetryUsage;
+  active_game: HardwareActiveGame | null;
+}
+
+

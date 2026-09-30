@@ -444,40 +444,100 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const restoreWindowsFactoryDefaults = async (
     reason: string = 'Solicitação do usuário'
-  ): Promise<{ success: boolean; message: string }> => {
+  ): Promise<{ success: boolean; message: string; reverted?: string[]; failed?: string[] }> => {
     setIsRestoringDefaults(true);
 
-    // Reset all optimization switches to off locally
-    setActiveToolsState({});
-    localStorage.removeItem('dyarte_active_tools');
+    if (config.require_agent_connection && !device.is_agent_connected) {
+      setIsRestoringDefaults(false);
+      const msg = 'Windows Agent desconectado. Inicie o dyarte-agent.exe para reverter as otimizações no sistema.';
+      addToast('error', 'Agent Desconectado', msg);
+      return { success: false, message: msg };
+    }
 
-    // Registrar histórico oficial de desativação de ferramentas
-    const historyItem: OptimizationHistoryItem = {
-      history_id: `hist_factory_reset_${Date.now()}`,
-      user_id: currentUser?.user_id || 'system',
-      tool_id: 'tool_safety_factory_reset',
-      tool_name: 'Desativação de Otimizações (Chave de Segurança)',
-      category: 'SISTEMA',
-      date: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-      status: 'SUCESSO',
-      result: `Otimizações locais desativadas no painel. Chave de segurança acionada. Motivo: ${reason}.`,
-      duration_ms: 0,
-      details: 'Mecanismo de segurança executado no painel.',
-    };
+    const appliedToolIds = Object.keys(activeToolsState).filter((id) => activeToolsState[id]);
+    const revertedList: string[] = [];
+    const failedList: string[] = [];
 
-    setHistory((prev) => [historyItem, ...prev]);
+    for (const toolId of appliedToolIds) {
+      const tool = tools.find((t) => t.tool_id === toolId);
+      if (!tool || !tool.is_reversible) {
+        continue;
+      }
+
+      try {
+        const rollbackAuth = await requestExecutionAuthorization(toolId, device.device_id, 'ROLLBACK');
+        if (!rollbackAuth.authorized || !rollbackAuth.execution_token || !rollbackAuth.execution_id || !rollbackAuth.request_id) {
+          failedList.push(tool.nome);
+          continue;
+        }
+
+        const startRes = await startExecutionOnBackend(rollbackAuth.execution_id, rollbackAuth.request_id);
+        if (!startRes.success) {
+          failedList.push(tool.nome);
+          continue;
+        }
+
+        const rollbackRes = await optimizationEngine.rollbackTool(
+          toolId,
+          currentUser?.nivel_plano || 1,
+          undefined,
+          rollbackAuth.execution_token,
+          rollbackAuth.request_id
+        );
+
+        if (!rollbackRes.success || !rollbackRes.verified || !(rollbackRes as any).receipt) {
+          if ((rollbackRes as any).receipt) {
+            await completeExecutionOnBackend(
+              rollbackAuth.execution_token,
+              (rollbackRes as any).receipt,
+              (rollbackRes as any).receiptSignature
+            );
+          }
+          failedList.push(tool.nome);
+          continue;
+        }
+
+        const completeRes = await completeExecutionOnBackend(
+          rollbackAuth.execution_token,
+          (rollbackRes as any).receipt,
+          (rollbackRes as any).receiptSignature
+        );
+
+        if (!completeRes.success) {
+          failedList.push(tool.nome);
+          continue;
+        }
+
+        revertedList.push(tool.nome);
+        setActiveToolsState((prev) => {
+          const next = { ...prev };
+          delete next[toolId];
+          return next;
+        });
+      } catch {
+        failedList.push(tool.nome);
+      }
+    }
+
+    // Persist updated switches
+    setActiveToolsState((current) => {
+      localStorage.setItem('dyarte_active_tools', JSON.stringify(current));
+      return current;
+    });
+
     setIsRestoringDefaults(false);
 
-    addToast(
-      'success',
-      'Otimizações Desativadas',
-      'As configurações ativas do aplicativo foram revertidas com sucesso.'
-    );
+    if (failedList.length > 0) {
+      const msg = `Reversão parcial: ${revertedList.length} revertida(s), ${failedList.length} falharam (${failedList.join(', ')}). Motivo: ${reason}.`;
+      addToast('warning', 'Reversão Parcial de Segurança', msg);
+      return { success: false, message: msg, reverted: revertedList, failed: failedList };
+    }
 
-    return {
-      success: true,
-      message: 'Otimizações locais desativadas com sucesso.',
-    };
+    const successMsg = revertedList.length > 0
+      ? `${revertedList.length} otimização(ões) revertida(s) com sucesso no Windows. Motivo: ${reason}.`
+      : 'Nenhuma otimização ativa necessitava de reversão.';
+    addToast('success', 'Padrão do Windows Restaurado', successMsg);
+    return { success: true, message: successMsg, reverted: revertedList, failed: [] };
   };
 
   // Driver Pipeline State (Download, Extract, Execute)

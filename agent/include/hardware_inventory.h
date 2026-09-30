@@ -106,6 +106,34 @@ public:
         return defaultVal;
     }
 
+    static uint64_t ReadRegistryQword(HKEY root, const char* subKey, const char* valueName, uint64_t defaultVal = 0, bool* outFound = nullptr) {
+        HKEY hKey;
+        if (outFound) *outFound = false;
+        if (RegOpenKeyExA(root, subKey, 0, KEY_READ | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS) {
+            if (RegOpenKeyExA(root, subKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+                return defaultVal;
+            }
+        }
+        uint64_t val = 0;
+        DWORD bufSize = sizeof(uint64_t);
+        DWORD type = 0;
+        if (RegQueryValueExA(hKey, valueName, NULL, &type, (LPBYTE)&val, &bufSize) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            if (outFound) *outFound = true;
+            return val;
+        }
+        // Fallback for 32-bit DWORD if stored as REG_DWORD
+        DWORD dwordVal = 0;
+        bufSize = sizeof(DWORD);
+        if (RegQueryValueExA(hKey, valueName, NULL, &type, (LPBYTE)&dwordVal, &bufSize) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            if (outFound) *outFound = true;
+            return static_cast<uint64_t>(dwordVal);
+        }
+        RegCloseKey(hKey);
+        return defaultVal;
+    }
+
     static std::string ExecCommand(const std::string& cmd) {
         FILE* pipe = _popen(cmd.c_str(), "r");
         if (!pipe) return "";
@@ -236,10 +264,10 @@ public:
             item.driverVer = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "DriverVersion");
             item.pnpId = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "MatchingDeviceId");
 
-            DWORD qwMem = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.qwMemorySize", 0);
+            uint64_t qwMem = ReadRegistryQword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.qwMemorySize", 0);
             if (qwMem > 0) item.vramBytes = qwMem;
             else {
-                DWORD memSize = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.MemorySize", 0);
+                uint64_t memSize = ReadRegistryQword(HKEY_LOCAL_MACHINE, subKey, "HardwareInformation.MemorySize", 0);
                 if (memSize > 0) item.vramBytes = memSize;
             }
 
@@ -324,6 +352,67 @@ public:
         uint64_t usedMb = usedBytes / (1024 * 1024);
         uint64_t availMb = availBytes / (1024 * 1024);
 
+        std::vector<std::string> moduleJsons;
+        std::string wmicOut = ExecCommand("wmic memorychip get Capacity,DeviceLocator,Manufacturer,PartNumber,Speed /format:csv");
+        if (!wmicOut.empty()) {
+            std::stringstream ssWmic(wmicOut);
+            std::string line;
+            bool headerFound = false;
+            while (std::getline(ssWmic, line)) {
+                line = Trim(line);
+                if (line.empty()) continue;
+                if (!headerFound) {
+                    if (line.find("Capacity") != std::string::npos || line.find("Node") != std::string::npos) {
+                        headerFound = true;
+                    }
+                    continue;
+                }
+                std::vector<std::string> parts;
+                std::stringstream ssLine(line);
+                std::string part;
+                while (std::getline(ssLine, part, ',')) {
+                    parts.push_back(Trim(part));
+                }
+                if (parts.size() >= 5) {
+                    std::string capStr = parts[1];
+                    std::string slot = parts[2];
+                    std::string mfg = parts[3];
+                    std::string partNum = parts[4];
+                    std::string speedStr = parts.size() >= 6 ? parts[5] : "";
+
+                    uint64_t capBytes = 0;
+                    try { capBytes = std::stoull(capStr); } catch (...) {}
+                    uint64_t capMb = capBytes / (1024 * 1024);
+
+                    std::string speedJson = "null";
+                    try {
+                        uint32_t sp = std::stoul(speedStr);
+                        if (sp > 0) speedJson = std::to_string(sp);
+                    } catch (...) {}
+
+                    std::stringstream mss;
+                    mss << "{"
+                        << "\"slot\":\"" << Escape(slot.empty() ? "N/D" : slot) << "\","
+                        << "\"capacity_bytes\":" << capBytes << ","
+                        << "\"capacity_mb\":" << capMb << ","
+                        << "\"manufacturer\":\"" << Escape(mfg.empty() ? "N/D" : mfg) << "\","
+                        << "\"part_number\":\"" << Escape(partNum.empty() ? "N/D" : partNum) << "\","
+                        << "\"speed_mhz\":" << speedJson << ","
+                        << "\"type\":\"DDR\""
+                        << "}";
+                    moduleJsons.push_back(mss.str());
+                }
+            }
+        }
+
+        std::stringstream modSs;
+        modSs << "[";
+        for (size_t i = 0; i < moduleJsons.size(); ++i) {
+            if (i > 0) modSs << ",";
+            modSs << moduleJsons[i];
+        }
+        modSs << "]";
+
         ss << "{"
            << "\"total_bytes\":" << totalBytes << ","
            << "\"total_mb\":" << totalMb << ","
@@ -332,7 +421,7 @@ public:
            << "\"available_bytes\":" << availBytes << ","
            << "\"available_mb\":" << availMb << ","
            << "\"usage_percent\":" << loadPct << ","
-           << "\"modules\":[]"
+           << "\"modules\":" << modSs.str()
            << "}";
 #else
         ss << "{"
@@ -352,6 +441,7 @@ public:
     /**
      * 14. ARMAZENAMENTO (Storage)
      * Separates physical disks from logical volumes.
+     * Real enumeration of physical disks via Win32_DiskDrive.
      * Never uses "Disco Local (C:)" or fixed "SSD" as physical disk properties.
      */
     static std::string detectStorage() {
@@ -388,22 +478,79 @@ public:
             "\"is_system\":true"
         "}]";
 
-        // Real Physical Disks: Query via PhysicalDrive or CIM
-        std::string disksJson = "[{"
-            "\"device_id\":\"PhysicalDrive0\","
-            "\"model\":\"N/D\","
-            "\"manufacturer\":\"N/D\","
-            "\"size_bytes\":" + std::to_string(total) + ","
-            "\"size_gb\":" + std::to_string(totalGb) + ","
-            "\"media_type\":\"N/D\","
-            "\"interface_type\":\"N/D\","
-            "\"serial_number\":\"N/D\","
-            "\"status\":\"N/D\","
-            "\"is_system\":true"
-        "}]";
+        // Real Physical Disks: Query via Win32_DiskDrive
+        std::vector<std::string> physicalDisks;
+        std::string wmicDisks = ExecCommand("wmic diskdrive get DeviceID,InterfaceType,Manufacturer,MediaType,Model,SerialNumber,Size,Status /format:csv");
+        if (!wmicDisks.empty()) {
+            std::stringstream ssDisks(wmicDisks);
+            std::string line;
+            bool headerFound = false;
+            while (std::getline(ssDisks, line)) {
+                line = Trim(line);
+                if (line.empty()) continue;
+                if (!headerFound) {
+                    if (line.find("DeviceID") != std::string::npos || line.find("Node") != std::string::npos) {
+                        headerFound = true;
+                    }
+                    continue;
+                }
+                // CSV line: Node,DeviceID,InterfaceType,Manufacturer,MediaType,Model,SerialNumber,Size,Status
+                std::vector<std::string> parts;
+                std::stringstream ssLine(line);
+                std::string part;
+                while (std::getline(ssLine, part, ',')) {
+                    parts.push_back(Trim(part));
+                }
+                if (parts.size() >= 8) {
+                    std::string devId = parts[1];
+                    std::string iface = parts[2];
+                    std::string mfg = parts[3];
+                    std::string media = parts[4];
+                    std::string model = parts[5];
+                    std::string serial = parts[6];
+                    std::string sizeStr = parts[7];
+                    std::string status = parts.size() >= 9 ? parts[8] : "OK";
+
+                    // Clean DeviceID from "\\.\PHYSICALDRIVE0" to "PhysicalDrive0"
+                    size_t slashPos = devId.find_last_of("\\/");
+                    if (slashPos != std::string::npos) {
+                        devId = devId.substr(slashPos + 1);
+                    }
+
+                    uint64_t diskSize = 0;
+                    try { diskSize = std::stoull(sizeStr); } catch (...) {}
+                    uint64_t diskSizeGb = diskSize / (1024 * 1024 * 1024);
+
+                    bool isSys = (physicalDisks.empty()); // First physical disk is typically the boot/system disk
+
+                    std::stringstream dss;
+                    dss << "{"
+                        << "\"device_id\":\"" << Escape(devId.empty() ? "N/D" : devId) << "\","
+                        << "\"model\":\"" << Escape(model.empty() ? "N/D" : model) << "\","
+                        << "\"manufacturer\":\"" << Escape(mfg.empty() ? "N/D" : mfg) << "\","
+                        << "\"size_bytes\":" << diskSize << ","
+                        << "\"size_gb\":" << diskSizeGb << ","
+                        << "\"media_type\":\"" << Escape(media.empty() ? "N/D" : media) << "\","
+                        << "\"interface_type\":\"" << Escape(iface.empty() ? "N/D" : iface) << "\","
+                        << "\"serial_number\":\"" << Escape(serial.empty() ? "N/D" : serial) << "\","
+                        << "\"status\":\"" << Escape(status.empty() ? "OK" : status) << "\","
+                        << "\"is_system\":" << (isSys ? "true" : "false")
+                        << "}";
+                    physicalDisks.push_back(dss.str());
+                }
+            }
+        }
+
+        std::stringstream disksSs;
+        disksSs << "[";
+        for (size_t i = 0; i < physicalDisks.size(); ++i) {
+            if (i > 0) disksSs << ",";
+            disksSs << physicalDisks[i];
+        }
+        disksSs << "]";
 
         ss << "{"
-           << "\"disks\":" << disksJson << ","
+           << "\"disks\":" << disksSs.str() << ","
            << "\"volumes\":" << volumesJson
            << "}";
 #else
@@ -548,11 +695,28 @@ public:
         DWORD gmVal = ReadRegistryDword(HKEY_CURRENT_USER, "Software\\Microsoft\\GameBar", "AutoGameModeEnabled", 1, &gmFound);
         std::string gmStr = gmFound ? (gmVal == 1 ? "\"ENABLED\"" : "\"DISABLED\"") : "\"N/D\"";
 
+        // Requirement 11: Real TPM detection
+        std::string tpmPresentStr = "null";
+        std::string tpmReadyStr = "null";
+        std::string tpmVersionStr = "null";
+        std::string tpmCmd = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { $t = Get-Tpm -ErrorAction Stop; [PSCustomObject]@{ p=$t.TpmPresent; r=$t.TpmReady; v=$t.ManufacturerVersion } | ConvertTo-Json -Compress } catch { }\"");
+        if (!tpmCmd.empty() && tpmCmd.find("\"p\":") != std::string::npos) {
+            JsonHelper tpmJson(tpmCmd);
+            if (tpmCmd.find("\"p\":true") != std::string::npos) tpmPresentStr = "true";
+            else if (tpmCmd.find("\"p\":false") != std::string::npos) tpmPresentStr = "false";
+
+            if (tpmCmd.find("\"r\":true") != std::string::npos) tpmReadyStr = "true";
+            else if (tpmCmd.find("\"r\":false") != std::string::npos) tpmReadyStr = "false";
+
+            std::string ver = tpmJson.get_field_string("v", "");
+            if (!ver.empty()) tpmVersionStr = "\"" + Escape(ver) + "\"";
+        }
+
         ss << "{"
            << "\"secure_boot\":" << sbStr << ","
-           << "\"tpm_present\":null,"
-           << "\"tpm_ready\":null,"
-           << "\"tpm_version\":null,"
+           << "\"tpm_present\":" << tpmPresentStr << ","
+           << "\"tpm_ready\":" << tpmReadyStr << ","
+           << "\"tpm_version\":" << tpmVersionStr << ","
            << "\"hags\":" << hagsStr << ","
            << "\"game_mode\":" << gmStr
            << "}";
@@ -581,6 +745,7 @@ public:
     /**
      * 21. PLANO DE ENERGIA (Power Plan)
      * powercfg /getactivescheme
+     * Requirement 12: Never state ACTIVE without real valid GUID confirmation
      */
     static std::string detectPowerPlan() {
         std::stringstream ss;
@@ -603,14 +768,22 @@ public:
             name = out.substr(parenStart + 1, parenEnd - parenStart - 1);
         }
 
-        ss << "{"
-           << "\"guid\":\"" << Escape(guid) << "\","
-           << "\"name\":\"" << Escape(name.empty() ? "N/D" : name) << "\","
-           << "\"state\":\"ACTIVE\""
-           << "}";
+        if (!guid.empty() && IsValidGuid(guid)) {
+            ss << "{"
+               << "\"guid\":\"" << Escape(guid) << "\","
+               << "\"name\":\"" << Escape(name.empty() ? "N/D" : name) << "\","
+               << "\"state\":\"ACTIVE\""
+               << "}";
+        } else {
+            ss << "{"
+               << "\"guid\":null,"
+               << "\"name\":\"N/D\","
+               << "\"state\":\"UNKNOWN\""
+               << "}";
+        }
 #else
         ss << "{"
-           << "\"guid\":\"\","
+           << "\"guid\":null,"
            << "\"name\":\"N/D\","
            << "\"state\":\"UNKNOWN\""
            << "}";

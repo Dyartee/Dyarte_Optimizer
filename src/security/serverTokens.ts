@@ -39,7 +39,7 @@ const PKCS8_HEADER = Buffer.from('302e020100300506032b657004220420', 'hex');
 const SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
 
 // Official public key for DYARTE OPTIMIZER execution authority (rotated, non-compromised)
-export const SERVER_ED25519_PUB_HEX = '9fc58ae7dd4361cad6a68dabefa3e061fbe684a76c0e91d53ad85a120e2d6666';
+export const SERVER_ED25519_PUB_HEX = 'd2d6fbcf8cd1798dc51f89f6ef8cf21d67b86134affa7b6539ebbc80e844568c';
 
 let cachedPrivateKey: crypto.KeyObject | null = null;
 let cachedPublicKey: crypto.KeyObject | null = null;
@@ -92,46 +92,37 @@ export function recordNonceConsumption(map: Map<string, NonceEntry>, nonce: stri
 
 /**
  * Validates and retrieves the server's Ed25519 signing private key.
- * STRICT SECURITY REQUIREMENTS (Sections 1 & 3):
- * - Loaded ONLY from external environment variable OPTIMIZATION_SIGNING_PRIVATE_KEY
+ * STRICT SECURITY REQUIREMENTS (Requirement 18):
+ * - Loaded strictly from environment variable OPTIMIZATION_SIGNING_PRIVATE_KEY
  * - Must be strictly 64 hex characters (32 raw bytes)
- * - NO fallback key in code
- * - NO auto-generation in code
- * - NO private key logging
+ * - Ausente -> erro
+ * - Inválida (senha, passphrase, string arbitrária) -> erro
+ * - Válida -> usar
+ * - NUNCA criar chave automaticamente
+ * - NUNCA derivar chave automaticamente via SHA-256
+ * - NUNCA registrar chave privada em logs
+ * - NUNCA utilizar fallback inseguro de .env em produção
  */
 export function getServerSigningPrivateKey(): crypto.KeyObject {
   if (cachedPrivateKey) {
     return cachedPrivateKey;
   }
 
-  let rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
-
-  // If environment variable is missing or invalid, check local .env without committing secret
-  if (!rawKeyHex || rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
-    try {
-      if (fs.existsSync('.env')) {
-        const envContent = fs.readFileSync('.env', 'utf-8');
-        const match = envContent.match(/^OPTIMIZATION_SIGNING_PRIVATE_KEY=([0-9a-fA-F]{64})$/m);
-        if (match) {
-          rawKeyHex = match[1];
-        }
-      }
-    } catch {
-      // Ignore disk read error
-    }
-  }
-
-  if (rawKeyHex && (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex))) {
-    // If a secret string or passphrase was provided instead of 64 hex characters,
-    // deterministically hash it to a 32-byte (64-hex) Ed25519 private seed
-    rawKeyHex = crypto.createHash('sha256').update(rawKeyHex, 'utf8').digest('hex');
-  }
+  const rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
 
   if (!rawKeyHex) {
-    const errorMsg =
-      '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
-      'O backend requer uma chave privada Ed25519 (64 hex characters) para emitir tokens de execução.';
-    throw new Error(errorMsg);
+    throw new Error(
+      '[CONFIG_KEY_MISSING] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
+      'Formato esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
+    );
+  }
+
+  if (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
+    throw new Error(
+      '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY é inválida. ' +
+      'Não são aceitas senhas, passphrases ou strings arbitrárias. ' +
+      'Formato estrito esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
+    );
   }
 
   try {
@@ -421,7 +412,7 @@ function canonicalizeValue(val: any): any {
  */
 export function serializeCanonicalReceipt(receipt: ExecutionReceiptPayload): string {
   const ordered = {
-    agent_version: receipt.agent_version || '1.1.0',
+    agent_version: receipt.agent_version || 'N/D',
     after_state: canonicalizeValue(receipt.after_state),
     before_state: canonicalizeValue(receipt.before_state),
     device_id: receipt.device_id,

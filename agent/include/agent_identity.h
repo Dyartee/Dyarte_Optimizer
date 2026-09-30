@@ -11,6 +11,7 @@
 #include <cstring>
 #include "ed25519_verify.h"
 #include "logger.h"
+#include "protocol.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -372,7 +373,7 @@ public:
     ) {
         std::stringstream ss;
         ss << "{"
-           << "\"agent_version\":\"" << EscapeJsonString(agentVersion.empty() ? "1.1.0" : agentVersion) << "\""
+           << "\"agent_version\":\"" << EscapeJsonString(agentVersion.empty() ? ProtocolConstants::AGENT_VERSION : agentVersion) << "\""
            << ",\"after_state\":" << (afterStateJson.empty() ? "null" : afterStateJson)
            << ",\"before_state\":" << (beforeStateJson.empty() ? "null" : beforeStateJson)
            << ",\"device_id\":\"" << EscapeJsonString(deviceId) << "\""

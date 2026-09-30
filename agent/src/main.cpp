@@ -485,6 +485,8 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
         case MessageType::APPLY_OPTIMIZATION: {
             std::string toolId = json.get_field_string("tool_id", "");
             std::string executionToken = json.get_field_string("execution_token", "");
+            std::string msgExecutionId = json.get_field_string("execution_id", "");
+            std::string msgUserId = json.get_field_string("user_id", "");
             int64_t protocolVersion = json.get_field_int64("protocol_version", 1);
 
             Logger::Instance().Info("APPLY_OPTIMIZATION received for tool: " + toolId + " (Request ID: " + requestId + ")");
@@ -538,6 +540,67 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     tokenRes.error,
                     "Execucao rejeitada por validacao criptografica do Agent.",
                     tokenRes.errorCode
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            // Requirement 5: Correlation validation between WebSocket message and token payload
+            if (requestId != tokenRes.requestId) {
+                Logger::Instance().Warn("APPLY_OPTIMIZATION rejected: request_id mismatch (msg: " + requestId + ", token: " + tokenRes.requestId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "REQUEST_ID_MISMATCH: request_id da mensagem diverge do token.",
+                    "Execucao rejeitada: request_id divergente.",
+                    "REQUEST_ID_MISMATCH"
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            if (!msgExecutionId.empty() && msgExecutionId != tokenRes.executionId) {
+                Logger::Instance().Warn("APPLY_OPTIMIZATION rejected: execution_id mismatch (msg: " + msgExecutionId + ", token: " + tokenRes.executionId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "EXECUTION_ID_MISMATCH: execution_id da mensagem diverge do token.",
+                    "Execucao rejeitada: execution_id divergente.",
+                    "EXECUTION_ID_MISMATCH"
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            if (!msgUserId.empty() && msgUserId != tokenRes.userId) {
+                Logger::Instance().Warn("APPLY_OPTIMIZATION rejected: user_id mismatch (msg: " + msgUserId + ", token: " + tokenRes.userId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "USER_ID_MISMATCH: user_id da mensagem diverge do token.",
+                    "Execucao rejeitada: user_id divergente.",
+                    "USER_ID_MISMATCH"
                 );
                 g_serverInstance->SendTextMessage(clientSock, response);
                 break;
@@ -807,6 +870,8 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
         case MessageType::ROLLBACK_OPTIMIZATION: {
             std::string toolId = json.get_field_string("tool_id", "");
             std::string executionToken = json.get_field_string("execution_token", "");
+            std::string msgExecutionId = json.get_field_string("execution_id", "");
+            std::string msgUserId = json.get_field_string("user_id", "");
             Logger::Instance().Info("ROLLBACK_OPTIMIZATION received for tool: " + toolId + " (Request ID: " + requestId + ")");
 
             // Section 10: ROLLBACK_OPTIMIZATION também exige execution_token assinado com operation=ROLLBACK
@@ -846,6 +911,67 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     tokenRes.error,
                     "Rollback rejeitado por validacao criptografica do Agent.",
                     tokenRes.errorCode
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            // Requirement 5: Correlation validation between WebSocket message and token payload
+            if (requestId != tokenRes.requestId) {
+                Logger::Instance().Warn("ROLLBACK_OPTIMIZATION rejected: request_id mismatch (msg: " + requestId + ", token: " + tokenRes.requestId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "REQUEST_ID_MISMATCH: request_id da mensagem diverge do token.",
+                    "Rollback rejeitado: request_id divergente.",
+                    "REQUEST_ID_MISMATCH"
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            if (!msgExecutionId.empty() && msgExecutionId != tokenRes.executionId) {
+                Logger::Instance().Warn("ROLLBACK_OPTIMIZATION rejected: execution_id mismatch (msg: " + msgExecutionId + ", token: " + tokenRes.executionId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "EXECUTION_ID_MISMATCH: execution_id da mensagem diverge do token.",
+                    "Rollback rejeitado: execution_id divergente.",
+                    "EXECUTION_ID_MISMATCH"
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            if (!msgUserId.empty() && msgUserId != tokenRes.userId) {
+                Logger::Instance().Warn("ROLLBACK_OPTIMIZATION rejected: user_id mismatch (msg: " + msgUserId + ", token: " + tokenRes.userId + ")");
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId,
+                    toolId,
+                    "FALHA",
+                    false,
+                    false,
+                    "{}",
+                    "{}",
+                    false,
+                    0,
+                    "USER_ID_MISMATCH: user_id da mensagem diverge do token.",
+                    "Rollback rejeitado: user_id divergente.",
+                    "USER_ID_MISMATCH"
                 );
                 g_serverInstance->SendTextMessage(clientSock, response);
                 break;

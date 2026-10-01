@@ -13,7 +13,8 @@
     "electron:dist": "npm run build && electron-builder --win --x64",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js release",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx tests/execution-flow/token-validator.test.ts && tsx tests/execution-flow/integration-pipeline.test.ts && tsx tests/windows/hardware-inventory.integration.test.ts && tsx scripts/verify-security-auth.ts && tsx scripts/verify-mandatory-tests.ts"
   },
   "build": {
     "appId": "com.dyarte.optimizer",

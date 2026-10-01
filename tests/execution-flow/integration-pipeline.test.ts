@@ -10,7 +10,8 @@
  * Regra: Nenhuma duração artificial (110, 85). Duração medida em tempo real.
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import {

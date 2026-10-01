@@ -31,7 +31,8 @@
  * 27. Execution já finalizada -> REJEITA (EXECUTION_ALREADY_COMPLETED)
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 import crypto from 'crypto';
 import {
   validateServerSigningConfiguration,

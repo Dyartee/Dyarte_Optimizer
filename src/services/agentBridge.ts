@@ -45,6 +45,7 @@ export interface AgentStatusResponse {
   power_scheme?: {
     guid: string;
     name: string;
+    state?: string;
   };
   device_id?: string;
   agent_public_key?: string;
@@ -282,7 +283,7 @@ class AgentBridgeService {
           if (resp.type === 'TEST_CONNECTION_RESULT') {
             resolve({
               success: Boolean(resp.success),
-              agent_version: resp.agent_version || '1.0.0',
+              agent_version: resp.agent_version || 'N/D',
               request_id: resp.request_id,
             });
           } else {
@@ -525,7 +526,7 @@ class AgentBridgeService {
       const snapshot: TelemetrySnapshot = {
         version: msg.version || this.PROTOCOL_VERSION,
         timestamp: msg.timestamp || Date.now(),
-        agent_version: msg.agent_version || '1.0.0',
+        agent_version: msg.agent_version || 'N/D',
         telemetry: {
           timestamp: msg.timestamp || Date.now(),
           cpu_usage: cpuUsage,

@@ -97,10 +97,15 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     const decoded = await adminAuth.verifyIdToken(token);
     req.user = decoded;
 
-    const isKelber = (decoded.email || '').toLowerCase() === 'kelberduarte22@gmail.com';
+    const userEmail = (decoded.email || '').toLowerCase();
+    const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || '')
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean);
+    const isAdmin = (userEmail && configAdminEmails.includes(userEmail)) || decoded.role === 'ADMIN' || decoded.role === 'SUPER_ADMIN';
 
-    // Ensure Custom Claim role: ADMIN for the master administrator
-    if (isKelber && decoded.role !== 'ADMIN') {
+    // Ensure Custom Claim role: ADMIN for the authorized administrator
+    if (isAdmin && decoded.role !== 'ADMIN' && decoded.role !== 'SUPER_ADMIN') {
       try {
         await adminAuth.setCustomUserClaims(decoded.uid, { role: 'ADMIN' });
       } catch (claimErr) {
@@ -117,8 +122,8 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
       if (req.userDoc.status === 'BLOQUEADO') {
         return res.status(403).json({ error: 'Sua conta foi suspensa pela administração.' });
       }
-      // Guarantee master admin account retains privileges even if doc was tampered with
-      if (isKelber && (req.userDoc.role !== 'ADMIN' || req.userDoc.nivel_plano !== 4)) {
+      // Guarantee admin account retains privileges
+      if (isAdmin && (req.userDoc.role !== 'ADMIN' || req.userDoc.nivel_plano !== 4)) {
         await userDocRef.update({
           role: 'ADMIN',
           nivel_plano: 4,
@@ -137,15 +142,15 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         user_id: decoded.uid,
         nome: decoded.name || (decoded.email ? decoded.email.split('@')[0] : 'Usuário'),
         email: (decoded.email || '').toLowerCase(),
-        role: isKelber ? 'ADMIN' : 'USER',
-        nivel_plano: isKelber ? 4 : 1,
-        plano_atual: isKelber ? 'COMPLETO' : 'BÁSICO',
+        role: isAdmin ? 'ADMIN' : 'USER',
+        nivel_plano: isAdmin ? 4 : 1,
+        plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
         status_plano: 'ATIVO',
         data_criacao: new Date().toISOString().split('T')[0],
         data_inicio: new Date().toISOString().split('T')[0],
-        data_expiracao: isKelber ? '2030-12-31' : '-',
-        license_id: isKelber ? `lic_${decoded.uid.substring(0, 8)}` : '',
-        status_licenca: isKelber ? 'ATIVA' : 'INATIVA',
+        data_expiracao: isAdmin ? '2030-12-31' : '-',
+        license_id: isAdmin ? `lic_${decoded.uid.substring(0, 8)}` : '',
+        status_licenca: isAdmin ? 'ATIVA' : 'INATIVA',
         device_id: 'N/D',
         ultimo_login: new Date().toISOString(),
         status: 'ATIVO',
@@ -153,13 +158,13 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
       await userDocRef.set(defaultUser, { merge: true });
       req.userDoc = defaultUser;
 
-      if (isKelber) {
+      if (isAdmin) {
         await adminDb.collection('admins').doc(decoded.uid).set({
-          email: 'kelberduarte22@gmail.com',
+          email: userEmail,
           role: 'ADMIN',
           status: 'ACTIVE',
           granted_at: new Date().toISOString(),
-          notes: 'Administrador Mestre Vinculado',
+          notes: 'Administrador Vinculado',
         }, { merge: true });
       }
     }
@@ -171,19 +176,24 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   }
 }
 
-// Admin Authorization Middleware (Strictly kelberduarte22@gmail.com or verified Custom Claims)
+// Admin Authorization Middleware (Role-Based Access Control - Section 39)
 async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user || !req.userDoc) {
     return res.status(401).json({ error: 'Autenticação requerida.' });
   }
 
   const userEmail = (req.user.email || '').toLowerCase();
-  const isMasterAdmin = userEmail === 'kelberduarte22@gmail.com';
-  const hasAdminClaim = req.user.role === 'ADMIN';
+  const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  const hasAdminClaim = req.user.role === 'ADMIN' || req.user.role === 'SUPER_ADMIN';
+  const hasAdminDoc = req.userDoc.role === 'ADMIN' || req.userDoc.role === 'SUPER_ADMIN';
+  const isEnvAdmin = Boolean(userEmail && configAdminEmails.includes(userEmail));
 
-  if (!isMasterAdmin && !hasAdminClaim) {
+  if (!hasAdminClaim && !hasAdminDoc && !isEnvAdmin) {
     return res.status(403).json({
-      error: 'Acesso negado. Apenas o administrador autorizado (kelberduarte22@gmail.com) possui permissão.',
+      error: 'Acesso negado. Apenas usuários com perfil de administrador possuem permissão.',
     });
   }
 
@@ -732,7 +742,7 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
         before_state: receipt.before_state || null,
         after_state: receipt.after_state || null,
         duration_ms: realDuration,
-        agent_version: receipt.agent_version || '1.1.0',
+        agent_version: receipt.agent_version || 'N/D',
         rollback_available: Boolean(receipt.rollback_available),
         verified: Boolean(receipt.verified),
         receipt_verified: true,
@@ -868,7 +878,7 @@ app.post('/api/agent/pair', requireAuth, async (req: AuthenticatedRequest, res: 
       device_id: safeDeviceId,
       user_id: uid,
       agent_public_key: safePubKey,
-      agent_version: typeof agent_version === 'string' ? agent_version.trim() : '1.1.0',
+      agent_version: typeof agent_version === 'string' && agent_version.trim() ? agent_version.trim() : 'N/D',
       cpu: cpu || 'N/D',
       gpu: gpu || 'N/D',
       ram: ram || 'N/D',
@@ -1292,13 +1302,13 @@ app.delete('/api/admin/user/:userId', requireAuth, requireAdmin, async (req: Aut
       return res.status(400).json({ error: 'ID do usuário é obrigatório.' });
     }
 
-    // Safety check: protect master admin from deletion
+    // Safety check: protect administrators from deletion
     const userDocRef = adminDb.collection('users').doc(userId);
     const userSnap = await userDocRef.get();
     if (userSnap.exists) {
       const data = userSnap.data();
-      if (data?.email?.toLowerCase() === 'kelberduarte22@gmail.com') {
-        return res.status(403).json({ error: 'Não é permitido excluir o usuário Administrador Master.' });
+      if (data?.role === 'ADMIN' || data?.role === 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Não é permitido excluir contas com perfil de Administrador.' });
       }
     }
 

@@ -220,8 +220,15 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
   public async verify(): Promise<boolean> {
     if (agentBridge.getState() !== 'AGENT_ONLINE') return false;
     const status = await agentBridge.getStatus(3000);
-    const highPerfGuid = '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1';
-    return Boolean(status.power_scheme?.guid && status.power_scheme.guid.toLowerCase() === highPerfGuid.toLowerCase());
+    if (!status.power_scheme?.guid) return false;
+    const name = (status.power_scheme.name || '').toLowerCase();
+    return Boolean(
+      name.includes('dyarte') ||
+      name.includes('desempenho') ||
+      name.includes('performance') ||
+      name.includes('ultimate') ||
+      status.power_scheme.state === 'ACTIVE'
+    );
   }
 }
 

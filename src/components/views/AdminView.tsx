@@ -193,10 +193,8 @@ export const AdminView: React.FC = () => {
   const [newToolLevel, setNewToolLevel] = useState<PlanLevel>(1);
   const [newToolImpact, setNewToolImpact] = useState<'Médio' | 'Alto' | 'Máximo'>('Médio');
 
-  // Security gate - Master Admin account check
-  const isMasterAdmin =
-    currentUser?.email?.toLowerCase() === 'kelberduarte22@gmail.com' ||
-    currentUser?.role === 'ADMIN';
+  // Security gate - Admin account check (Section 39)
+  const isMasterAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPER_ADMIN';
 
   if (!isMasterAdmin) {
     return (
@@ -206,8 +204,8 @@ export const AdminView: React.FC = () => {
           Acesso Restrito ao Painel Administrativo
         </h2>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          Somente a conta administrativa master autorizada (<strong className="text-white">kelberduarte22@gmail.com</strong>)
-          possui privilégios de acesso ao gerenciamento de clientes, planos, licenças e logs do sistema.
+          Somente contas com privilégios de Administrador autorizadas
+          possuem privilégios de acesso ao gerenciamento de clientes, planos, licenças e logs do sistema.
         </p>
         <p className="text-[11px] text-zinc-500 font-mono">
           Autentique-se com a conta de Administrador oficial no menu de acesso.
@@ -685,7 +683,7 @@ export const AdminView: React.FC = () => {
                           >
                             {user.status === 'ATIVO' ? 'Bloquear' : 'Desbloquear'}
                           </button>
-                          {user.email.toLowerCase() !== 'kelberduarte22@gmail.com' && (
+                          {user.role !== 'ADMIN' && user.user_id !== currentUser?.user_id && (
                             <button
                               onClick={() => handleDeleteUser(user.user_id, user.nome)}
                               className="px-2.5 py-1 rounded text-[11px] font-mono font-semibold bg-red-950/50 hover:bg-red-950 text-red-400 border border-red-800/50 transition-colors cursor-pointer inline-flex items-center gap-1"

@@ -232,6 +232,7 @@ public:
         std::string pnpId;
         uint64_t vramBytes = 0;
         bool isPrimary = false;
+        bool isPrimaryDetermined = false;
     };
 
     static std::vector<GpuDeviceItem> enumeratePhysicalGpus() {
@@ -280,7 +281,23 @@ public:
                 item.vendor = "Intel";
             }
 
-            item.isPrimary = list.empty();
+            // Real Primary GPU detection via EnumDisplayDevicesA (Section 11)
+            // Never assume item.isPrimary = list.empty(). If undetermined, is_primary will be null.
+            item.isPrimary = false;
+            item.isPrimaryDetermined = false;
+            DISPLAY_DEVICEA dd;
+            ZeroMemory(&dd, sizeof(dd));
+            dd.cb = sizeof(dd);
+            for (DWORD d = 0; EnumDisplayDevicesA(NULL, d, &dd, 0); ++d) {
+                if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) {
+                    std::string ddString = dd.DeviceString ? dd.DeviceString : "";
+                    if (!ddString.empty() && (ddString.find(name) != std::string::npos || name.find(ddString) != std::string::npos)) {
+                        item.isPrimary = true;
+                        item.isPrimaryDetermined = true;
+                        break;
+                    }
+                }
+            }
             list.push_back(item);
         }
 #endif
@@ -290,6 +307,7 @@ public:
     static std::string formatGpuItemJson(const GpuDeviceItem& item) {
         std::stringstream ss;
         uint64_t vramMb = item.vramBytes > 0 ? (item.vramBytes / (1024 * 1024)) : 0;
+        std::string primaryStr = item.isPrimaryDetermined ? (item.isPrimary ? "true" : "false") : "null";
         ss << "{"
            << "\"manufacturer\":\"" << Escape(item.vendor.empty() ? "N/D" : item.vendor) << "\","
            << "\"model\":\"" << Escape(item.name.empty() ? "N/D" : item.name) << "\","
@@ -300,7 +318,7 @@ public:
            << "\"pci_device_id\":\"" << Escape(item.pnpId.empty() ? "N/D" : item.pnpId) << "\","
            << "\"temperature_c\":null,"
            << "\"usage_percent\":null,"
-           << "\"is_primary\":" << (item.isPrimary ? "true" : "false")
+           << "\"is_primary\":" << primaryStr
            << "}";
         return ss.str();
     }
@@ -310,7 +328,7 @@ public:
         if (!gpus.empty()) {
             return formatGpuItemJson(gpus[0]);
         }
-        return "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":true}";
+        return "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":null}";
     }
 
     static std::string detectGPUsArrayJson() {
@@ -322,7 +340,7 @@ public:
             ss << formatGpuItemJson(gpus[i]);
         }
         if (gpus.empty()) {
-            ss << "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":true}";
+            ss << "{\"manufacturer\":\"N/D\",\"model\":\"N/D\",\"full_name\":\"N/D\",\"vram_bytes\":null,\"vram_mb\":null,\"driver_version\":\"N/D\",\"pci_device_id\":\"N/D\",\"temperature_c\":null,\"usage_percent\":null,\"is_primary\":null}";
         }
         ss << "]";
         return ss.str();
@@ -353,20 +371,14 @@ public:
         uint64_t availMb = availBytes / (1024 * 1024);
 
         std::vector<std::string> moduleJsons;
-        std::string wmicOut = ExecCommand("wmic memorychip get Capacity,DeviceLocator,Manufacturer,PartNumber,Speed /format:csv");
-        if (!wmicOut.empty()) {
-            std::stringstream ssWmic(wmicOut);
+        // Query physical RAM sticks via CIM / PowerShell (Section 10: No WMIC)
+        std::string psOut = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | ForEach-Object { \\\"$($_.Capacity),$($_.DeviceLocator),$($_.Manufacturer),$($_.PartNumber),$($_.Speed),$($_.SerialNumber),$($_.MemoryType),$($_.FormFactor)\\\" } } catch { }\"");
+        if (!psOut.empty()) {
+            std::stringstream ssPs(psOut);
             std::string line;
-            bool headerFound = false;
-            while (std::getline(ssWmic, line)) {
+            while (std::getline(ssPs, line)) {
                 line = Trim(line);
                 if (line.empty()) continue;
-                if (!headerFound) {
-                    if (line.find("Capacity") != std::string::npos || line.find("Node") != std::string::npos) {
-                        headerFound = true;
-                    }
-                    continue;
-                }
                 std::vector<std::string> parts;
                 std::stringstream ssLine(line);
                 std::string part;
@@ -374,14 +386,18 @@ public:
                     parts.push_back(Trim(part));
                 }
                 if (parts.size() >= 5) {
-                    std::string capStr = parts[1];
-                    std::string slot = parts[2];
-                    std::string mfg = parts[3];
-                    std::string partNum = parts[4];
-                    std::string speedStr = parts.size() >= 6 ? parts[5] : "";
+                    std::string capStr = parts[0];
+                    std::string slot = parts[1];
+                    std::string mfg = parts[2];
+                    std::string partNum = parts[3];
+                    std::string speedStr = parts[4];
+                    std::string serial = parts.size() >= 6 ? parts[5] : "";
+                    std::string memType = parts.size() >= 7 ? parts[6] : "";
+                    std::string formFactor = parts.size() >= 8 ? parts[7] : "";
 
                     uint64_t capBytes = 0;
                     try { capBytes = std::stoull(capStr); } catch (...) {}
+                    uint64_t capGb = capBytes / (1024ULL * 1024ULL * 1024ULL);
                     uint64_t capMb = capBytes / (1024 * 1024);
 
                     std::string speedJson = "null";
@@ -393,12 +409,16 @@ public:
                     std::stringstream mss;
                     mss << "{"
                         << "\"slot\":\"" << Escape(slot.empty() ? "N/D" : slot) << "\","
+                        << "\"device_locator\":\"" << Escape(slot.empty() ? "N/D" : slot) << "\","
                         << "\"capacity_bytes\":" << capBytes << ","
+                        << "\"capacity_gb\":" << capGb << ","
                         << "\"capacity_mb\":" << capMb << ","
                         << "\"manufacturer\":\"" << Escape(mfg.empty() ? "N/D" : mfg) << "\","
                         << "\"part_number\":\"" << Escape(partNum.empty() ? "N/D" : partNum) << "\","
+                        << "\"serial_number\":\"" << Escape(serial.empty() ? "N/D" : serial) << "\","
                         << "\"speed_mhz\":" << speedJson << ","
-                        << "\"type\":\"DDR\""
+                        << "\"memory_type\":\"" << Escape(memType.empty() ? "N/D" : memType) << "\","
+                        << "\"form_factor\":\"" << Escape(formFactor.empty() ? "DIMM" : formFactor) << "\""
                         << "}";
                     moduleJsons.push_back(mss.str());
                 }
@@ -478,40 +498,33 @@ public:
             "\"is_system\":true"
         "}]";
 
-        // Real Physical Disks: Query via Win32_DiskDrive
+        // Real Physical Disks: Query via Win32_DiskDrive and identify system drive accurately without WMIC (Section 9 & 10)
         std::vector<std::string> physicalDisks;
-        std::string wmicDisks = ExecCommand("wmic diskdrive get DeviceID,InterfaceType,Manufacturer,MediaType,Model,SerialNumber,Size,Status /format:csv");
-        if (!wmicDisks.empty()) {
-            std::stringstream ssDisks(wmicDisks);
+        std::string psDisks = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { $sysDrive = $env:SystemDrive; $sysDiskNum = -1; try { $p = Get-Partition -DriveLetter ($sysDrive.TrimEnd(':')) -ErrorAction SilentlyContinue; if ($p) { $sysDiskNum = $p.DiskNumber } } catch {}; Get-CimInstance Win32_DiskDrive -ErrorAction Stop | ForEach-Object { $dIndex = $_.Index; $isSys = if ($sysDiskNum -ge 0) { if ($dIndex -eq $sysDiskNum) { 'true' } else { 'false' } } else { 'null' }; \\\"$($_.DeviceID)|$($_.InterfaceType)|$($_.Manufacturer)|$($_.MediaType)|$($_.Model)|$($_.SerialNumber)|$($_.Size)|$($_.Status)|$isSys\\\" } } catch { }\"");
+        if (!psDisks.empty()) {
+            std::stringstream ssDisks(psDisks);
             std::string line;
-            bool headerFound = false;
             while (std::getline(ssDisks, line)) {
                 line = Trim(line);
                 if (line.empty()) continue;
-                if (!headerFound) {
-                    if (line.find("DeviceID") != std::string::npos || line.find("Node") != std::string::npos) {
-                        headerFound = true;
-                    }
-                    continue;
-                }
-                // CSV line: Node,DeviceID,InterfaceType,Manufacturer,MediaType,Model,SerialNumber,Size,Status
                 std::vector<std::string> parts;
                 std::stringstream ssLine(line);
                 std::string part;
-                while (std::getline(ssLine, part, ',')) {
+                while (std::getline(ssLine, part, '|')) {
                     parts.push_back(Trim(part));
                 }
                 if (parts.size() >= 8) {
-                    std::string devId = parts[1];
-                    std::string iface = parts[2];
-                    std::string mfg = parts[3];
-                    std::string media = parts[4];
-                    std::string model = parts[5];
-                    std::string serial = parts[6];
-                    std::string sizeStr = parts[7];
-                    std::string status = parts.size() >= 9 ? parts[8] : "OK";
+                    std::string devId = parts[0];
+                    std::string iface = parts[1];
+                    std::string mfg = parts[2];
+                    std::string media = parts[3];
+                    std::string model = parts[4];
+                    std::string serial = parts[5];
+                    std::string sizeStr = parts[6];
+                    std::string status = parts[7].empty() ? "OK" : parts[7];
+                    std::string isSysStr = parts.size() >= 9 ? parts[8] : "null";
 
-                    // Clean DeviceID from "\\.\PHYSICALDRIVE0" to "PhysicalDrive0"
+                    // Clean DeviceID from "\\\\.\\PHYSICALDRIVE0" to "PhysicalDrive0"
                     size_t slashPos = devId.find_last_of("\\/");
                     if (slashPos != std::string::npos) {
                         devId = devId.substr(slashPos + 1);
@@ -519,9 +532,7 @@ public:
 
                     uint64_t diskSize = 0;
                     try { diskSize = std::stoull(sizeStr); } catch (...) {}
-                    uint64_t diskSizeGb = diskSize / (1024 * 1024 * 1024);
-
-                    bool isSys = (physicalDisks.empty()); // First physical disk is typically the boot/system disk
+                    uint64_t diskSizeGb = diskSize / (1024ULL * 1024ULL * 1024ULL);
 
                     std::stringstream dss;
                     dss << "{"
@@ -533,8 +544,8 @@ public:
                         << "\"media_type\":\"" << Escape(media.empty() ? "N/D" : media) << "\","
                         << "\"interface_type\":\"" << Escape(iface.empty() ? "N/D" : iface) << "\","
                         << "\"serial_number\":\"" << Escape(serial.empty() ? "N/D" : serial) << "\","
-                        << "\"status\":\"" << Escape(status.empty() ? "OK" : status) << "\","
-                        << "\"is_system\":" << (isSys ? "true" : "false")
+                        << "\"status\":\"" << Escape(status) << "\","
+                        << "\"is_system\":" << isSysStr
                         << "}";
                     physicalDisks.push_back(dss.str());
                 }
@@ -860,7 +871,7 @@ public:
     /**
      * Combined Full Hardware Inventory JSON adhering strictly to unified schema.
      */
-    static std::string getFullInventory(const std::string& deviceId = "", const std::string& agentVersion = "1.1.0") {
+    static std::string getFullInventory(const std::string& deviceId = "", const std::string& agentVersion = "N/D") {
         auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();

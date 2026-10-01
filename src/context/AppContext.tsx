@@ -634,7 +634,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+    const startRes = await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+    if (!startRes?.success) {
+      const errMsg = startRes?.error || 'Falha ao registrar início da execução do DDU no servidor central.';
+      addToast('error', 'Falha no Registro', errMsg);
+      setDduStatus('DDU_FAILED');
+      return {
+        status: 'DDU_FAILED',
+        success: false,
+        message: errMsg,
+        error: errMsg,
+      };
+    }
 
     setIsDduRunning(true);
     try {
@@ -934,7 +945,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+    const startRes = await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+    if (!startRes?.success) {
+      const errorMsg = startRes?.error || `Falha ao registrar início da execução do driver ${brand} no servidor central.`;
+      setDriverPipeline((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: 'failed',
+              progress: 100,
+              actionText: 'Falha ao registrar início no servidor central.',
+              errorMessage: errorMsg,
+            }
+          : null
+      );
+      addToast('error', 'Falha no Registro', errorMsg);
+      return {
+        status: 'FAILED',
+        code: 'START_REGISTRATION_FAILED',
+        success: false,
+        message: errorMsg,
+      };
+    }
 
     // Executa o instalador através do DriverService nativo passando o execution token assinado
     let execResult;
@@ -1273,7 +1305,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser && fbUser.email) {
         const emailLower = fbUser.email.toLowerCase();
-        const isAdminEmail = emailLower === 'kelberduarte22@gmail.com';
+        const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+        const isAdminEmail = Boolean(envAdmin && emailLower === envAdmin);
 
         try {
           const userRef = doc(db, 'users', fbUser.uid);
@@ -1347,7 +1380,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const userCredential = await signInWithEmailAndPassword(auth, safeEmail, safePass);
       const fbUser = userCredential.user;
-      const isAdmin = safeEmail === 'kelberduarte22@gmail.com';
+      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+      const isAdmin = Boolean(envAdmin && safeEmail === envAdmin);
 
       // Load Firestore profile
       let userData: User;
@@ -1489,7 +1523,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const cred = await createUserWithEmailAndPassword(auth, safeEmail, rawSenha);
       const fbUser = cred.user;
-      const isAdmin = safeEmail === 'kelberduarte22@gmail.com';
+      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+      const isAdmin = Boolean(envAdmin && safeEmail === envAdmin);
 
       const newUser: User = {
         user_id: fbUser.uid,
@@ -1554,7 +1589,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const cred = await signInWithPopup(auth, googleAuthProvider);
       const fbUser = cred.user;
       const emailLower = (fbUser.email || '').toLowerCase();
-      const isAdmin = emailLower === 'kelberduarte22@gmail.com';
+      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+      const isAdmin = Boolean(envAdmin && emailLower === envAdmin);
 
       const userRef = doc(db, 'users', fbUser.uid);
       const snap = await getDoc(userRef);
@@ -1657,7 +1693,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
     if (role === 'ADMIN') {
-      const adminAcc = users.find((u) => u.email.toLowerCase() === 'kelberduarte22@gmail.com') || INITIAL_USERS[0];
+      const adminAcc = users.find((u) => u.role === 'ADMIN') || INITIAL_USERS[0];
       setCurrentUser(adminAcc);
       addToast('info', 'Modo Administrador Ativado', 'Você está navegando com privilégios de Administrador Master (Dev).');
     } else {
@@ -1702,7 +1738,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setDevice((prev) => ({
         ...prev,
         is_agent_connected: isOnline,
-        agent_version: '1.0.0',
+        agent_version: isOnline ? (prev.agent_version !== 'N/D' ? prev.agent_version : 'N/D') : 'N/D',
         last_heartbeat: isOnline
           ? 'Online (127.0.0.1:49152)'
           : state === 'AGENT_CONNECTING'
@@ -1771,7 +1807,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addToast(
         'success',
         'Agente Windows Testado',
-        `Comunicação validada com sucesso! Versão do agente: ${res.agent_version || '1.0.0'}`
+        `Comunicação validada com sucesso! Versão do agente: ${res.agent_version || 'N/D'}`
       );
     } else {
       addToast(
@@ -2182,7 +2218,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const currentlyActive = !!activeToolsState[toolId];
     const willBeActive = !currentlyActive;
 
-    let result;
+    let result: any;
+    let completeRes: any;
+
     if (willBeActive) {
       const authRes = await requestExecutionAuthorization(toolId, device.device_id, 'APPLY');
       if (!authRes.authorized || !authRes.execution_token || !authRes.execution_id || !authRes.request_id) {
@@ -2193,7 +2231,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errText, active: currentlyActive };
       }
 
-      await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+      // Requirement 2: Explicitly check startResult. SOMENTE se start.success === true continuar para o Agent!
+      const startRes = await startExecutionOnBackend(authRes.execution_id, authRes.request_id);
+      if (!startRes?.success) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        const errText = startRes?.error || 'Não foi possível iniciar a execução no backend.';
+        addToast('error', 'Falha no Registro', errText);
+        return { success: false, message: errText, active: currentlyActive };
+      }
 
       result = await optimizationEngine.applyTool(
         toolId,
@@ -2202,12 +2248,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         authRes.request_id
       );
 
-      if (result.receipt) {
-        await completeExecutionOnBackend(
-          authRes.execution_token,
-          result.receipt,
-          result.receiptSignature
-        );
+      // Requirements 3, 4, 5: result.success === true && result.verified === true && valid receipt
+      if (!result?.success || !result?.verified || !result?.receipt) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        if (result?.receipt) {
+          await completeExecutionOnBackend(
+            authRes.execution_token,
+            result.receipt,
+            result.receiptSignature
+          );
+        }
+        const failMsg = result?.error || result?.message || 'Falha na aplicação ou verificação pelo Windows Agent.';
+        addToast('warning', 'Operação Não Executada', failMsg);
+        return { success: false, message: failMsg, active: currentlyActive };
+      }
+
+      // Requirements 3, 4: completeExecutionOnBackend é autoridade final
+      completeRes = await completeExecutionOnBackend(
+        authRes.execution_token,
+        result.receipt,
+        result.receiptSignature
+      );
+
+      if (!completeRes?.success) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        const failMsg = completeRes?.error || 'O backend não confirmou a conclusão da execução.';
+        addToast('error', 'Validação Rejeitada', failMsg);
+        return { success: false, message: failMsg, active: currentlyActive };
       }
     } else {
       const rollbackAuthRes = await requestExecutionAuthorization(toolId, device.device_id, 'ROLLBACK');
@@ -2219,7 +2288,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errText, active: currentlyActive };
       }
 
-      await startExecutionOnBackend(rollbackAuthRes.execution_id, rollbackAuthRes.request_id);
+      // Requirement 2: Explicitly check startResult for ROLLBACK!
+      const startRes = await startExecutionOnBackend(rollbackAuthRes.execution_id, rollbackAuthRes.request_id);
+      if (!startRes?.success) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        const errText = startRes?.error || 'Não foi possível iniciar a reversão no backend.';
+        addToast('error', 'Falha no Registro', errText);
+        return { success: false, message: errText, active: currentlyActive };
+      }
 
       result = await optimizationEngine.rollbackTool(
         toolId,
@@ -2229,29 +2306,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         rollbackAuthRes.request_id
       );
 
-      if ((result as any).receipt) {
-        await completeExecutionOnBackend(
-          rollbackAuthRes.execution_token,
-          (result as any).receipt,
-          (result as any).receiptSignature
-        );
+      // Requirements 3, 4, 5: ROLLBACK must have the same rigidity as APPLY!
+      if (!result?.success || !result?.verified || !result?.receipt) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        if (result?.receipt) {
+          await completeExecutionOnBackend(
+            rollbackAuthRes.execution_token,
+            result.receipt,
+            result.receiptSignature
+          );
+        }
+        const failMsg = result?.error || result?.message || 'Falha na reversão ou verificação pelo Windows Agent.';
+        addToast('warning', 'Reversão Não Confirmada', failMsg);
+        return { success: false, message: failMsg, active: currentlyActive };
+      }
+
+      completeRes = await completeExecutionOnBackend(
+        rollbackAuthRes.execution_token,
+        result.receipt,
+        result.receiptSignature
+      );
+
+      if (!completeRes?.success) {
+        setIsOptimizing(false);
+        setActiveOptimizingToolId(null);
+        const failMsg = completeRes?.error || 'O backend não confirmou a conclusão da reversão.';
+        addToast('error', 'Validação Rejeitada', failMsg);
+        return { success: false, message: failMsg, active: currentlyActive };
       }
     }
 
     setIsOptimizing(false);
     setActiveOptimizingToolId(null);
 
-    if (!result.success || (willBeActive && !result.verified)) {
-      const failMsg = result.error || result.message || 'Operação não executada pelo DYARTE Agent.';
-      addToast('warning', 'Operação Não Executada', failMsg);
-      return {
-        success: false,
-        message: failMsg,
-        active: currentlyActive,
-      };
-    }
-
-    // Only update state if Agent confirmed real execution
+    // SOMENTE DEPOIS DE completeRes.success === true:
+    // Atualizar estado local
     setActiveToolsState((prev) => {
       const updated = { ...prev, [toolId]: willBeActive };
       localStorage.setItem('dyarte_active_tools', JSON.stringify(updated));
@@ -2261,7 +2351,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const toolTitle = getToolName(tool);
     const realDuration = typeof (result as any).durationMs === 'number' ? Math.max(0, (result as any).durationMs) : 0;
 
-    const historyItem: OptimizationHistoryItem = {
+    const historyItem: OptimizationHistoryItem = completeRes?.record || {
       history_id: `hist_${Date.now()}`,
       user_id: currentUser.user_id,
       tool_id: tool.tool_id,

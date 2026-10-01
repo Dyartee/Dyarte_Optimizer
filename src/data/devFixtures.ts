@@ -8,8 +8,8 @@ import { User, License, AdminLog } from '../types';
 export const DEV_USERS: User[] = [
   {
     user_id: 'usr_duarte_dev',
-    nome: 'Kelber Duarte (Admin)',
-    email: 'kelberduarte22@gmail.com',
+    nome: 'Administrador Master',
+    email: 'admin@dyarte.com',
     data_criacao: '2026-08-15',
     plano_atual: 'COMPLETO',
     nivel_plano: 4,
@@ -47,8 +47,8 @@ export const DEV_LICENSES: License[] = [
     license_id: 'lic_duarte_dev',
     license_key: 'DYARTE-8821-9944-X72A',
     user_id: 'usr_duarte_dev',
-    user_name: 'Duarte',
-    user_email: 'kelberduarte22@gmail.com',
+    user_name: 'Administrador Master',
+    user_email: 'admin@dyarte.com',
     plan_id: 'completo',
     status: 'ATIVA',
     created_at: '2026-09-01',

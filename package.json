@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js release",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/execution-flow/token-validator.test.ts && tsx tests/execution-flow/integration-pipeline.test.ts && tsx tests/windows/hardware-inventory.integration.test.ts && tsx scripts/verify-security-auth.ts && tsx scripts/verify-mandatory-tests.ts"
+    "test": "tsx tests/unit/validation-helpers.test.ts && tsx tests/protocol/token-validator.test.ts && tsx tests/protocol/integration-pipeline.test.ts && tsx tests/protocol/failure-cases.test.ts && tsx tests/windows/hardware-inventory.integration.test.ts && tsx tests/windows/powerplan.e2e.test.ts && tsx tests/windows/apply-rollback.e2e.test.ts && tsx tests/windows/crosscheck.integration.test.ts && tsx tests/e2e/system-flow.e2e.test.ts && tsx scripts/verify-security-auth.ts && tsx scripts/verify-mandatory-tests.ts"
   },
   "build": {
     "appId": "com.dyarte.optimizer",

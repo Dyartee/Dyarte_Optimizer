@@ -1,170 +1,116 @@
-# DYARTE Windows Agent V1
+# DYARTE Windows Agent V1.1.0
 
 Agente nativo do Windows para o **DYARTE OPTIMIZER**.
 
-Responsável por fornecer telemetria em tempo real e orquestrar operações locais no sistema operacional Windows através de um canal WebSocket local seguro.
+Responsável por fornecer telemetria em tempo real, inventário de hardware verificado e orquestrar operações locais de otimização e restauração no sistema operacional Windows através de um canal WebSocket local seguro (RFC 6455).
 
 ---
 
-## 1. Visão Geral e Arquitetura
+## 1. Arquitetura de Execução Real
 
-* **Tecnologia:** C++17 nativo
-* **Bibliotecas de Rede:** WinSock2 (`ws2_32.lib`)
-* **Criptografia/Handshake:** Win32 CryptoAPI e implementação nativa SHA-1/Base64 (`crypt32.lib`)
-* **Dependências Externas:** **Zero**. Executável 100% autônomo, sem dependência do .NET Runtime ou bibliotecas de terceiros.
-* **Interface de Rede:** Estritamente `127.0.0.1:49152` (Loopback local). Não escuta em `0.0.0.0` e rejeita qualquer tentativa de conexão externa.
-* **Logs Locais:** Gravados continuamente em `logs/dyarte-agent.log`.
-
----
-
-## 2. Estrutura de Arquivos
+O fluxo de comunicação e execução segue estritamente o modelo de autorização central:
 
 ```text
-agent/
-├── CMakeLists.txt              # Configuração do projeto CMake
-├── build.bat                   # Script automatizado de compilação para Windows
-├── README.md                   # Documentação oficial do agente
-├── include/
-│   ├── logger.h                # Sistema de log thread-safe (console + arquivo)
-│   ├── json_helper.h           # Leitor e validador JSON sem dependências
-│   ├── protocol.h              # Especificação de protocolo, whitelists e validação
-│   ├── sha1_base64.h           # Algoritmos criptográficos RFC 6455
-│   └── websocket_server.h      # Servidor WebSocket RFC 6455 em loopback
-└── src/
-    ├── main.cpp                # Ponto de entrada, ciclo de vida e tratamento de sinais
-    └── websocket_server.cpp    # Implementação de sockets e framing RFC 6455
+React UI (Frontend)
+    ↓
+Electron Desktop Runtime
+    ↓
+Central Backend Authorization (/api/tools/execute -> Token Ed25519)
+    ↓
+Central Backend START Guard (/api/executions/start -> Registrado como EXECUTANDO)
+    ↓
+AgentBridge (WebSocket client)
+    ↓
+WebSocket loopback (127.0.0.1:49152)
+    ↓
+dyarte-agent.exe (Windows Native Agent em C++17)
+    ↓
+Backup Real do Estado Atual
+    ↓
+Aplicação Nativa (Win32 APIs / Registry / powercfg / Process Control)
+    ↓
+Verificação Pós-Execução (Leitura direta do sistema)
+    ↓
+Canonical Agent Signed Receipt (Assinatura Ed25519 pelo Agent)
+    ↓
+Central Backend COMPLETE (/api/executions/complete -> Validação Criptográfica)
+    ↓
+React UI (Confirmação de Sucesso / Estado APLICADO ou REVERTIDO)
 ```
 
 ---
 
-## 3. Protocolo de Comunicação (V1)
+## 2. Tecnologias e Segurança Criptográfica
 
-Todas as mensagens transitam em formato JSON delimitado por frames RFC 6455.
-
-### 3.1 Handshake Inicial
-**Cliente (React UI):**
-```json
-{
-  "protocol_version": 1,
-  "type": "HANDSHAKE",
-  "client": "DYARTE_OPTIMIZER"
-}
-```
-**Agente (`dyarte-agent.exe`):**
-```json
-{
-  "protocol_version": 1,
-  "type": "HANDSHAKE_ACK",
-  "agent_version": "1.0.0",
-  "status": "ONLINE"
-}
-```
-
-### 3.2 Heartbeat (Ping / Pong)
-**Cliente:**
-```json
-{
-  "protocol_version": 1,
-  "type": "PING",
-  "timestamp": 1715000000
-}
-```
-**Agente:**
-```json
-{
-  "protocol_version": 1,
-  "type": "PONG",
-  "timestamp": 1715000000
-}
-```
-
-### 3.3 Teste de Conectividade Segura (`TEST_CONNECTION`)
-**Cliente:**
-```json
-{
-  "protocol_version": 1,
-  "request_id": "req-9842a1",
-  "type": "TEST_CONNECTION"
-}
-```
-**Agente:**
-```json
-{
-  "protocol_version": 1,
-  "request_id": "req-9842a1",
-  "type": "TEST_CONNECTION_RESULT",
-  "success": true,
-  "agent_version": "1.0.0"
-}
-```
+* **Linguagem & Padrão:** C++17 nativo compilado em modo Release (MSVC).
+* **Interface de Rede:** Estritamente `127.0.0.1:49152` (Loopback local isolado).
+* **Dependências Externas:** Zero. Binário estático e autônomo sem dependência do .NET Runtime ou runtimes externos.
+* **Assinatura Ed25519 de Tokens:** O backend central assina tokens de autorização (TTL máximo de 60s) contendo:
+  - `tool_id`, `user_id`, `device_id`, `operation` (APPLY ou ROLLBACK), `execution_id`, `request_id`, `nonce`, `iat`, `exp`.
+* **Assinatura Ed25519 de Recibos:** O Agent assina o recibo canônico contendo:
+  - `execution_id`, `request_id`, `operation`, `tool_id`, `user_id`, `device_id`, `agent_version`, `timestamp`, `duration_ms`, `before_state`, `after_state`, `verified`, `status`, `rollback_available`, `receipt_nonce`.
+* **Proteção contra Replay:** Nonces de tokens e de recibos são registrados e consumidos uma única vez com expiração e descarte automático.
 
 ---
 
-## 4. Segurança
+## 3. Estados Oficiais da Otimização (Section 38)
 
-1. **Whitelist Rigorosa de Tipos:** Apenas os tipos `HANDSHAKE`, `PING` e `TEST_CONNECTION` são aceitos.
-2. **Bloqueio de Comandos Arbitrários:** Qualquer payload contendo termos como `"command"`, `"powershell"`, `"script"`, `"shell"` ou `"execute"` é rejeitado imediatamente com registro de auditoria.
-3. **Limite de Tamanho:** Payloads acima de 64 KB são descartados.
-4. **Isolamento de Rede:** O socket faz bind exclusivo em `127.0.0.1`.
+Transições estritas gerenciadas pelo backend central e refletidas na interface:
+
+* `DISPONIVEL`: Ferramenta implementada, pronta para autorização.
+* `INCOMPATIVEL`: Verificação de compatibilidade falhou (hardware, versão do Windows ou permissões).
+* `JA_APLICADO`: Otimização já verificada como ativa no sistema.
+* `APLICANDO`: Autorização aprovada e execução em andamento no Agent.
+* `APLICADO`: Execução concluída, verificada no Windows e confirmada pelo backend.
+* `REVERTENDO`: Rollback em andamento com restauração de backup original.
+* `REVERTIDO`: Rollback concluído, verificado no Windows e confirmado pelo backend.
+* `FALHA`: Qualquer etapa da cadeia falhou (START, Agent, Verify, Receipt ou COMPLETE).
 
 ---
 
-## 5. Como Compilar no Windows
+## 4. Campos N/D no Inventário de Hardware (Section 13 & 62)
+
+O DYARTE OPTIMIZER proíbe qualquer simulação ou valor fictício. Campos retornam `N/D` ou `null` quando:
+
+* **Frequência Máxima de CPU:** Retorna `null` se a API de contadores de hardware não confirmar o clock de boost seguro.
+* **Temperatura de GPU / Uso de VRAM:** Retorna `null` quando os drivers WDDM proprietários ou bibliotecas de sensores não estiverem instalados.
+* **Resizable BAR / XMP / EXPO:** Retorna `N/D` por exigir chamadas de firmware UEFI/SMBIOS de baixo nível que variam conforme o fabricante da placa-mãe.
+* **Primary GPU:** Retorna `null` caso nenhum adaptador esteja atrelado à flag `DISPLAY_DEVICE_PRIMARY_DEVICE` do monitor ativo.
+* **Versão do Agent:** Retorna `N/D` se o agente não estiver conectado, nunca fabricando "1.0.0" ou qualquer versão fictícia.
+
+---
+
+## 5. Como Compilar no Windows (MSVC Release)
 
 ### Pré-requisitos:
-* Windows 10 ou Windows 11 (64-bit)
-* **Visual Studio 2022** (Community, Professional ou Build Tools) com a carga de trabalho *"Desenvolvimento para desktop com C++"* instalada.
-* CMake 3.15+ (opcional, já incluído no instalador do Visual Studio).
+* Windows 10 ou 11 (64-bit).
+* Visual Studio 2022 com a carga de trabalho C++ desktop instalada.
 
-### Método 1 — Via `build.bat` (Automático):
-1. Abra o **Developer Command Prompt for VS 2022** (ou *x64 Native Tools Command Prompt*).
-2. Navegue até o diretório `agent/`:
-   ```cmd
-   cd caminho\para\dyarte-optimizer\agent
-   build.bat
-   ```
-3. O executável será gerado em:
-   ```text
-   agent\build\Release\dyarte-agent.exe
-   ```
+### Método 1 — Via `build.bat`:
+```cmd
+cd agent
+build.bat
+```
 
-### Método 2 — Via CMake Manual:
+O executável será gerado em:
+```text
+agent\build\Release\dyarte-agent.exe
+```
+
+### Método 2 — Via CMake:
 ```cmd
 cd agent
 cmake -B build -A x64
 cmake --build build --config Release
 ```
 
-### Método 3 — Compilação Direta via MSVC (`cl.exe`):
-```cmd
-cd agent
-mkdir build\Release
-cl.exe /nologo /W3 /EHsc /std:c++17 /O2 /DNDEBUG /I include src\main.cpp src\websocket_server.cpp ws2_32.lib crypt32.lib /Fe:build\Release\dyarte-agent.exe
-```
-
 ---
 
-## 6. Como Executar e Testar
+## 6. Suíte de Testes
 
-### 6.1 Execução:
-Execute o binário compilado:
-```cmd
-cd agent\build\Release
-dyarte-agent.exe
-```
+Os testes são organizados por escopo (Section 28):
 
-Saída esperada no console:
-```text
-========================================
-DYARTE AGENT
-Version: 1.0.0
-Status: STARTING
-========================================
-Status: ONLINE
-Listening exclusively on 127.0.0.1:49152
-Press Ctrl+C to stop the agent.
-========================================
-```
-
-### 6.2 Encerramento Seguro:
-Pressione `Ctrl+C` na janela do console do agente. O agente encerrará os sockets e threads de forma limpa, gravando o encerramento em `logs/dyarte-agent.log`.
+* `tests/unit/`: Testes unitários com validação de schemas e regras isoladas.
+* `tests/protocol/`: Testes de validação criptográfica de tokens Ed25519, recibos canônicos e casos de falha.
+* `tests/windows/`: Testes de integração direta com Win32, CIM, powercfg e hardware nativo.
+* `tests/e2e/`: Ciclo de vida completo da arquitetura com verificação fim-a-fim.

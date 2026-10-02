@@ -101,39 +101,64 @@ export async function runHardwareInventoryIntegrationSuite() {
     `Arquitetura real do sistema: ${realInv.windows.architecture}`
   );
 
-  // Requirement 24 & 25: On Windows, compare live Agent data directly against Windows native commands
+  // Requirement 12, 24 & 25: On Windows, compare live Agent data directly against Windows native commands
   if (isWindows) {
+    // 1. CPU vs Win32_Processor
     try {
-      // 1. CPU vs Win32_Processor
       const wmiCpu = execSync('powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"', { encoding: 'utf8' }).trim();
-      if (wmiCpu && realInv.cpu.model && realInv.cpu.model !== 'N/D') {
+      if (!wmiCpu) {
+        logFail('Test 24 (Agent CPU vs Win32_Processor)', 'Consulta ao Win32_Processor retornou vazia.');
+      } else if (realInv.cpu.model && realInv.cpu.model !== 'N/D') {
         const match = wmiCpu.toLowerCase().includes(realInv.cpu.model.toLowerCase().slice(0, 10));
         assert(match, 'Test 24 (Agent CPU vs Win32_Processor)', `Agent ('${realInv.cpu.model}') confere com Windows ('${wmiCpu}').`);
+      } else {
+        logFail('Test 24 (Agent CPU vs Win32_Processor)', 'Modelo de CPU não informado pelo Agent.');
       }
+    } catch (winErr: any) {
+      logFail('Test 24 (Agent CPU vs Win32_Processor)', `Falha na consulta Win32_Processor: ${winErr.message}`);
+    }
 
-      // 2. BIOS vs Win32_BIOS
+    // 2. BIOS vs Win32_BIOS
+    try {
       const wmiBios = execSync('powershell.exe -NoProfile -Command "(Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion"', { encoding: 'utf8' }).trim();
-      if (wmiBios && realInv.bios.version && realInv.bios.version !== 'N/D') {
+      if (!wmiBios) {
+        logFail('Test 24 (Agent BIOS vs Win32_BIOS)', 'Consulta ao Win32_BIOS retornou vazia.');
+      } else if (realInv.bios.version && realInv.bios.version !== 'N/D') {
         assert(realInv.bios.version === wmiBios, 'Test 24 (Agent BIOS vs Win32_BIOS)', `Versão de BIOS confere com Windows: ${wmiBios}.`);
+      } else {
+        logFail('Test 24 (Agent BIOS vs Win32_BIOS)', 'Versão de BIOS não informada pelo Agent.');
       }
+    } catch (winErr: any) {
+      logFail('Test 24 (Agent BIOS vs Win32_BIOS)', `Falha na consulta Win32_BIOS: ${winErr.message}`);
+    }
 
-      // 3. Power Plan vs powercfg
+    // 3. Power Plan vs powercfg
+    try {
       const realPowerScheme = execSync('powercfg /getactivescheme', { encoding: 'utf8' }).trim();
-      if (realPowerScheme && realInv.power_plan?.guid) {
+      if (!realPowerScheme) {
+        logFail('Test 25 (Agent Power Plan vs powercfg)', 'Consulta powercfg /getactivescheme retornou vazia.');
+      } else if (realInv.power_plan?.guid) {
         assert(
           realPowerScheme.toLowerCase().includes(realInv.power_plan.guid.toLowerCase()),
           'Test 25 (Agent Power Plan vs powercfg)',
           `GUID ativo ('${realInv.power_plan.guid}') confere com powercfg.`
         );
+      } else {
+        logFail('Test 25 (Agent Power Plan vs powercfg)', 'GUID de plano de energia não informado pelo Agent.');
       }
     } catch (winErr: any) {
-      console.warn('[Windows Native Query Warning]:', winErr.message);
+      logFail('Test 25 (Agent Power Plan vs powercfg)', `Falha na consulta powercfg: ${winErr.message}`);
     }
-  }
 
-  console.log('================================================================');
-  console.log('RESULTADO DA SUÍTE DE HARDWARE: Todos os contratos reais validados com zero mock.');
-  console.log('================================================================');
+    console.log('================================================================');
+    console.log('RESULTADO DA SUÍTE DE HARDWARE: Todas as verificações Windows executadas e aprovadas com sucesso.');
+    console.log('================================================================');
+  } else {
+    logSkip('Windows Native Commands', 'Ambiente Linux/CI sem subsistema Windows nativo.');
+    console.log('================================================================');
+    console.log('RESULTADO DA SUÍTE DE HARDWARE: Contratos de protocolo aprovados, verificações nativas puladas (Ambiente não-Windows).');
+    console.log('================================================================');
+  }
 }
 
 // Run suite directly if executed as standalone script

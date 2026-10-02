@@ -10,6 +10,7 @@
 import { initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth, UserRecord } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import firebaseConfig from '../firebase-applet-config.json';
 
 async function bootstrapAdmin() {
   const targetIdentifier = process.argv[2];
@@ -21,14 +22,14 @@ async function bootstrapAdmin() {
 
   // Inicializa Firebase Admin se ainda não inicializado
   if (!getApps().length) {
-    const projectId = process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || 'dyarte-optimizer';
+    const projectId = firebaseConfig.projectId || process.env.VITE_FIREBASE_PROJECT_ID || 'global-mark-xpthm';
     initializeApp({
       projectId,
     });
   }
 
   const auth = getAuth();
-  const db = getFirestore();
+  const db = getFirestore(undefined, firebaseConfig.firestoreDatabaseId);
 
   try {
     let userRecord: UserRecord;

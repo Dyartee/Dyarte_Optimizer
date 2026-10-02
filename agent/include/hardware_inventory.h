@@ -418,7 +418,7 @@ public:
                         << "\"serial_number\":\"" << Escape(serial.empty() ? "N/D" : serial) << "\","
                         << "\"speed_mhz\":" << speedJson << ","
                         << "\"memory_type\":\"" << Escape(memType.empty() ? "N/D" : memType) << "\","
-                        << "\"form_factor\":\"" << Escape(formFactor.empty() ? "DIMM" : formFactor) << "\""
+                        << "\"form_factor\":\"" << Escape(formFactor.empty() ? "N/D" : formFactor) << "\""
                         << "}";
                     moduleJsons.push_back(mss.str());
                 }

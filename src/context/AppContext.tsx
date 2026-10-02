@@ -37,6 +37,8 @@ import {
   sendPasswordResetEmail,
   updatePassword,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   onAuthStateChanged,
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -99,6 +101,7 @@ interface AppContextType {
   webBrowserLoginSync: () => Promise<{ success: boolean; error?: string }>;
 
   // Auth & User
+  isAuthLoading: boolean;
   currentUser: User | null;
   users: User[];
   login: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
@@ -236,6 +239,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   });
 
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('dyarte_current_user');
     if (saved) {
@@ -1300,14 +1304,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  // Firebase Auth Real-Time State Listener
+  // Firebase Auth Real-Time State Listener & Single Source of Truth
   useEffect(() => {
+    // Process redirect result if arriving from signInWithRedirect
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (result?.user) {
+          const idToken = await result.user.getIdToken();
+          try {
+            const resp = await fetch('/api/auth/me', {
+              headers: { Authorization: `Bearer ${idToken}` },
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data.user) {
+                setCurrentUser(data.user);
+                localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
+              }
+            }
+          } catch (e) {
+            console.warn('[Redirect Auth Sync]', e);
+          }
+        }
+      })
+      .catch((err) => {
+        if (err && err.code) {
+          console.error('[Google Redirect Error]', { code: err.code, message: err.message });
+        }
+      });
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser && fbUser.email) {
         const emailLower = fbUser.email.toLowerCase();
-        const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+        const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || 'kelberduarte22@gmail.com').toLowerCase();
         const isAdminEmail = Boolean(envAdmin && emailLower === envAdmin);
 
+        try {
+          // Authoritative verification via backend with Firebase ID Token
+          const idToken = await fbUser.getIdToken();
+          const backendRes = await fetch('/api/auth/me', {
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+
+          if (backendRes.ok) {
+            const data = await backendRes.json();
+            if (data.user) {
+              setCurrentUser(data.user);
+              localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
+              setIsAuthLoading(false);
+              return;
+            }
+          }
+        } catch (backendErr) {
+          console.warn('[Backend Auth Verification Notice]: Fallback to direct Firestore sync.', backendErr);
+        }
+
+        // Fallback: Direct Firestore user document sync
         try {
           const userRef = doc(db, 'users', fbUser.uid);
           const snap = await getDoc(userRef);
@@ -1322,13 +1374,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 nivel_plano: 4,
                 status_plano: 'ATIVO',
               };
-              await setDoc(userRef, promoted, { merge: true });
+              try {
+                await setDoc(userRef, promoted, { merge: true });
+              } catch (mergeErr) {
+                console.warn('[Firestore Admin Sync Notice]:', mergeErr);
+              }
               setCurrentUser(promoted);
+              localStorage.setItem('dyarte_current_user', JSON.stringify(promoted));
             } else {
               setCurrentUser(userData);
+              localStorage.setItem('dyarte_current_user', JSON.stringify(userData));
             }
           } else {
-            // New user registration profile initialization
+            // New user registration profile initialization: Always starts at level 1 (BÁSICO, ATIVO)
             const newUser: User = {
               user_id: fbUser.uid,
               nome: fbUser.displayName || (isAdminEmail ? 'Kelber Duarte' : emailLower.split('@')[0]),
@@ -1338,31 +1396,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               nivel_plano: (isAdminEmail ? 4 : 1) as PlanLevel,
               status_plano: 'ATIVO',
               data_inicio: new Date().toISOString().split('T')[0],
-              data_expiracao: isAdminEmail ? '2030-12-31' : 'Vitalício (Gratuito)',
-              license_id: isAdminEmail ? 'lic_admin_duarte_master' : `lic_free_${fbUser.uid.slice(0, 8)}`,
-              status_licenca: 'ATIVA',
-              device_id: device.device_id,
+              data_expiracao: isAdminEmail ? '2030-12-31' : '-',
+              license_id: isAdminEmail ? 'lic_admin_duarte_master' : '',
+              status_licenca: isAdminEmail ? 'ATIVA' : 'INATIVA',
+              device_id: device.device_id || 'N/D',
               ultimo_login: 'Agora mesmo',
               role: isAdminEmail ? 'ADMIN' : 'USER',
               status: 'ATIVO',
             };
-            await setDoc(userRef, newUser);
-
-            if (isAdminEmail) {
-              await setDoc(doc(db, 'admins', fbUser.uid), {
-                user_id: fbUser.uid,
-                email: emailLower,
-                role: 'ADMIN',
-                status: 'ACTIVE',
-                granted_at: new Date().toISOString(),
-                notes: 'Master administrator account initialized',
-              });
+            try {
+              await setDoc(userRef, newUser);
+              if (isAdminEmail) {
+                await setDoc(doc(db, 'admins', fbUser.uid), {
+                  user_id: fbUser.uid,
+                  email: emailLower,
+                  role: 'ADMIN',
+                  status: 'ACTIVE',
+                  granted_at: new Date().toISOString(),
+                  notes: 'Master administrator account initialized',
+                });
+              }
+            } catch (err) {
+              console.warn('[Firestore SetDoc Warning]', err);
             }
             setCurrentUser(newUser);
+            localStorage.setItem('dyarte_current_user', JSON.stringify(newUser));
           }
         } catch (e) {
           console.warn('Firebase user sync note:', e);
+        } finally {
+          setIsAuthLoading(false);
         }
+      } else {
+        // User is unauthenticated
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        setIsAuthLoading(false);
       }
     });
 
@@ -1586,10 +1655,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
     try {
-      const cred = await signInWithPopup(auth, googleAuthProvider);
-      const fbUser = cred.user;
+      let fbUser;
+      try {
+        const cred = await signInWithPopup(auth, googleAuthProvider);
+        fbUser = cred.user;
+      } catch (popupErr: any) {
+        if (popupErr.code === 'auth/popup-blocked' && typeof window !== 'undefined' && !(window as any).dyarte?.ipc) {
+          console.warn('[Google Auth] Popup bloqueado, redirecionando...');
+          await signInWithRedirect(auth, googleAuthProvider);
+          return { success: true };
+        }
+        throw popupErr;
+      }
+
+      // Validar token no Backend autoritativo
+      try {
+        const idToken = await fbUser.getIdToken();
+        const backendRes = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+
+        if (backendRes.ok) {
+          const data = await backendRes.json();
+          if (data.user) {
+            setCurrentUser(data.user);
+            localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
+            addToast('success', 'Autenticado com Google', `Bem-vindo, ${data.user.nome}!`);
+            return { success: true };
+          }
+        }
+      } catch (beErr) {
+        console.warn('[Backend Auth Verification]', beErr);
+      }
+
+      // Fallback: carregar ou inicializar usuário via Firestore direto
       const emailLower = (fbUser.email || '').toLowerCase();
-      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
+      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || 'kelberduarte22@gmail.com').toLowerCase();
       const isAdmin = Boolean(envAdmin && emailLower === envAdmin);
 
       const userRef = doc(db, 'users', fbUser.uid);
@@ -1600,7 +1701,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userData = snap.data() as User;
         if (isAdmin && userData.role !== 'ADMIN') {
           userData = { ...userData, role: 'ADMIN', plano_atual: 'COMPLETO', nivel_plano: 4 };
-          await setDoc(userRef, userData, { merge: true });
+          try {
+            await setDoc(userRef, userData, { merge: true });
+          } catch (mergeErr) {
+            console.warn('[Firestore Admin Sync Notice]:', mergeErr);
+          }
         }
       } else {
         userData = {
@@ -1612,41 +1717,74 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           nivel_plano: (isAdmin ? 4 : 1) as PlanLevel,
           status_plano: 'ATIVO',
           data_inicio: new Date().toISOString().split('T')[0],
-          data_expiracao: isAdmin ? '2030-12-31' : 'Vitalício (Gratuito)',
-          license_id: isAdmin ? 'lic_admin_duarte_master' : `lic_free_${fbUser.uid.slice(0, 8)}`,
-          status_licenca: 'ATIVA',
-          device_id: device.device_id,
+          data_expiracao: isAdmin ? '2030-12-31' : '-',
+          license_id: isAdmin ? 'lic_admin_duarte_master' : '',
+          status_licenca: isAdmin ? 'ATIVA' : 'INATIVA',
+          device_id: device.device_id || 'N/D',
           ultimo_login: 'Agora mesmo',
           role: isAdmin ? 'ADMIN' : 'USER',
           status: 'ATIVO',
         };
-        await setDoc(userRef, userData);
-        if (isAdmin) {
-          await setDoc(doc(db, 'admins', fbUser.uid), {
-            user_id: fbUser.uid,
-            email: emailLower,
-            role: 'ADMIN',
-            status: 'ACTIVE',
-            granted_at: new Date().toISOString(),
-          });
+        try {
+          await setDoc(userRef, userData);
+          if (isAdmin) {
+            await setDoc(doc(db, 'admins', fbUser.uid), {
+              user_id: fbUser.uid,
+              email: emailLower,
+              role: 'ADMIN',
+              status: 'ACTIVE',
+              granted_at: new Date().toISOString(),
+            });
+          }
+        } catch (dbErr) {
+          console.warn('[Firestore SetDoc Warning]:', dbErr);
         }
       }
 
       setCurrentUser(userData);
+      localStorage.setItem('dyarte_current_user', JSON.stringify(userData));
       addToast('success', 'Autenticado com Google', `Bem-vindo, ${userData.nome}!`);
       return { success: true };
     } catch (err: any) {
-      console.error('[Google Login] Erro na autenticação:', err);
-      let errorMsg = err.message || 'Falha ao autenticar com Google.';
-      
-      if (err.code === 'auth/unauthorized-domain') {
-        errorMsg = 'Domínio local não autorizado no Firebase. Adicione "localhost" e "127.0.0.1" em Firebase Console -> Authentication -> Settings -> Authorized Domains.';
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        errorMsg = 'A janela de autenticação do Google foi fechada antes da conclusão.';
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        errorMsg = 'Solicitação de login cancelada. Nova tentativa já em andamento.';
-      } else if (err.code === 'auth/network-request-failed') {
-        errorMsg = 'Falha de conexão com os servidores do Google. Verifique sua conexão com a internet.';
+      // Log técnico seguro: código e mensagem de erro SEM vazar credenciais ou tokens
+      console.error('[Google Login Error]', {
+        code: err?.code || 'UNKNOWN_AUTH_ERROR',
+        message: err?.message || 'Falha na autenticação Google.',
+      });
+
+      let errorMsg = err?.message || 'Falha ao autenticar com Google.';
+
+      switch (err?.code) {
+        case 'auth/popup-blocked':
+          errorMsg = 'A janela de autenticação foi bloqueada pelo navegador. Habilite pop-ups para este site ou utilize o redirecionamento.';
+          break;
+        case 'auth/popup-closed-by-user':
+          errorMsg = 'A janela de autenticação do Google foi fechada antes da conclusão do login.';
+          break;
+        case 'auth/cancelled-popup-request':
+          errorMsg = 'Solicitação de login cancelada. Nova tentativa já em andamento.';
+          break;
+        case 'auth/unauthorized-domain':
+          errorMsg = 'Domínio de origem não autorizado no Firebase. Adicione o domínio atual em Authentication -> Settings -> Authorized Domains.';
+          break;
+        case 'auth/operation-not-allowed':
+          errorMsg = 'O provedor de login com Google não está habilitado no Firebase Authentication Console.';
+          break;
+        case 'auth/invalid-api-key':
+          errorMsg = 'Chave de API do Firebase inválida ou expirada.';
+          break;
+        case 'auth/invalid-oauth-client-id':
+          errorMsg = 'OAuth Client ID do Google não corresponde à configuração do projeto.';
+          break;
+        case 'auth/network-request-failed':
+          errorMsg = 'Falha de comunicação com os servidores do Google. Verifique sua conexão de rede.';
+          break;
+        case 'auth/account-exists-with-different-credential':
+          errorMsg = 'Já existe uma conta cadastrada com este e-mail associada a outro método (ex: senha). Entre com sua senha para vincular sua conta.';
+          break;
+        case 'auth/internal-error':
+          errorMsg = 'Erro interno nos serviços de autenticação do Google/Firebase.';
+          break;
       }
 
       return { success: false, error: errorMsg };
@@ -1679,6 +1817,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // ignore
     }
     setCurrentUser(null);
+    localStorage.removeItem('dyarte_current_user');
     setCurrentView('dashboard');
     addToast('info', 'Sessão Encerrada', 'Você saiu da sua conta com segurança.');
   };
@@ -2800,6 +2939,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     lastWebSync,
     syncWithWebsite,
     webBrowserLoginSync,
+    isAuthLoading,
     currentUser,
     users,
     login,

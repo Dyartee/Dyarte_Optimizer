@@ -54,7 +54,7 @@ export interface IOptimizationHandler {
   inspectCurrentState(): Promise<any>;
   apply(executionToken?: string, backendRequestId?: string): Promise<OptimizationExecutionResult>;
   rollback(beforeState?: any, executionToken?: string, backendRequestId?: string): Promise<OptimizationRollbackResult>;
-  verify(): Promise<boolean>;
+  verify(expectedStateOrGuid?: any): Promise<boolean>;
 }
 
 /**
@@ -217,18 +217,16 @@ export class PowerPlanOptimizationHandler implements IOptimizationHandler {
     };
   }
 
-  public async verify(): Promise<boolean> {
+  public async verify(expectedGuid?: string): Promise<boolean> {
     if (agentBridge.getState() !== 'AGENT_ONLINE') return false;
     const status = await agentBridge.getStatus(3000);
-    if (!status.power_scheme?.guid) return false;
-    const name = (status.power_scheme.name || '').toLowerCase();
-    return Boolean(
-      name.includes('dyarte') ||
-      name.includes('desempenho') ||
-      name.includes('performance') ||
-      name.includes('ultimate') ||
-      status.power_scheme.state === 'ACTIVE'
-    );
+    const activeGuid = status.power_scheme?.guid;
+    if (!activeGuid) return false;
+
+    // Requirement 23: Verification strictly compares target GUID vs actual active GUID
+    // expectedGuid === actualGuid. Somente então: verified = true
+    const target = expectedGuid || '8c5e7fda-e8bf-4a96-9a14-5e7d687951d1';
+    return activeGuid.toLowerCase() === target.toLowerCase();
   }
 }
 

@@ -4,7 +4,7 @@ export type PlanLevel = 1 | 2 | 3 | 4;
 
 export type PlanId = 'basico' | 'medio' | 'avancado' | 'completo';
 
-export type LicenseStatus = 'ATIVA' | 'PENDENTE' | 'EXPIRADA' | 'SUSPENSA' | 'CANCELADA';
+export type LicenseStatus = 'ATIVA' | 'PENDENTE' | 'EXPIRADA' | 'SUSPENSA' | 'CANCELADA' | 'INATIVA';
 
 export type ToolCategory = 'SISTEMA' | 'DESEMPENHO' | 'GAMING' | 'GPU';
 
@@ -219,7 +219,7 @@ export interface DriverExecutionResult {
   vendorDir?: string;
 }
 
-export type DriverPipelineStatusCode = 'PENDING' | 'FAILED' | 'SUCCESS';
+export type DriverPipelineStatusCode = 'PENDING' | 'EXECUTING' | 'PENDING_EXTERNAL_OPERATION' | 'PENDING_REBOOT' | 'REBOOT_REQUIRED' | 'FAILED' | 'SUCCESS';
 export type DriverPipelineEventCode =
   | 'INSTALLER_LAUNCHED'
   | 'INSTALLER_NOT_FOUND'
@@ -228,6 +228,8 @@ export type DriverPipelineEventCode =
   | 'DESKTOP_REQUIRED'
   | 'EXECUTION_FAILED'
   | 'START_REGISTRATION_FAILED'
+  | 'PENDING_EXTERNAL_OPERATION'
+  | 'REBOOT_REQUIRED'
   | 'INSTALLATION_CONFIRMED'
   | 'UNAUTHORIZED_MUTATION';
 
@@ -238,7 +240,7 @@ export interface DriverPipelineResult {
   message: string;
 }
 
-export type DduStatus = 'DDU_NOT_FOUND' | 'DDU_FOUND' | 'DDU_LAUNCHED' | 'DDU_FAILED';
+export type DduStatus = 'DDU_NOT_FOUND' | 'DDU_FOUND' | 'DDU_LAUNCHED' | 'DDU_FAILED' | 'PENDING_REBOOT' | 'REBOOT_REQUIRED' | 'COMPLETED';
 
 export interface DduPathResult {
   found: boolean;
@@ -256,6 +258,17 @@ export interface DduExecutionResult {
   fullPath?: string | null;
   fileName?: string;
   error?: string;
+}
+
+export interface RebootAwareExecutionState {
+  execution_id: string;
+  request_id: string;
+  operation: 'APPLY' | 'ROLLBACK';
+  tool_id: string;
+  state: 'EXECUTING' | 'PENDING_REBOOT' | 'REBOOT_REQUIRED' | 'COMPLETED' | 'FAILED';
+  pending_action: string;
+  expected_verification: string;
+  created_at: number;
 }
 
 export interface GpuDetectionResult {

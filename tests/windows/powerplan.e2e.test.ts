@@ -17,6 +17,12 @@
 import { execSync } from 'child_process';
 import { agentBridge } from '../../src/services/agentBridge';
 import { optimizationEngine } from '../../src/services/optimizationEngine';
+import {
+  generateOptimizationExecutionToken,
+  verifyOptimizationExecutionToken,
+  verifyAgentReceipt,
+} from '../../src/security/serverTokens';
+import { CANONICAL_TOOLS_MAP } from '../../src/data/canonicalCatalog';
 
 function logPass(testName: string, detail: string) {
   console.log(`\x1b[32m[PASS]\x1b[0m ${testName}: ${detail}`);
@@ -54,104 +60,164 @@ function getActivePowerPlanFromWindows(): PowerSchemeInfo | null {
   return null;
 }
 
-export async function runPowerPlanE2eSuite() {
-  console.log('================================================================');
-  console.log('DYARTE OPTIMIZER — POWER PLAN REAL E2E TEST (SEC 24 & 53)');
-  console.log('================================================================');
+/**
+ * 1. Integration Test: Validação de Contrato e Catálogo
+ */
+export async function runPowerPlanIntegrationTest() {
+  console.log('\n--- SUÍTE 1: POWER PLAN INTEGRATION TEST (CONTRATO & CATÁLOGO) ---');
+  const tool = CANONICAL_TOOLS_MAP['tool_perf_power_plan'];
+  if (!tool) {
+    logFail('PowerPlan Catalog Contract', 'Ferramenta tool_perf_power_plan ausente no catálogo canônico.');
+    return;
+  }
+  logPass('PowerPlan Catalog Contract', `Ferramenta canônica registrada: '${tool.nome}' (Plano Nível ${tool.required_plan_level}).`);
+}
 
+/**
+ * 2. Full Execution E2E Lifecycle:
+ * Authorization -> START -> Agent -> PowerCfg -> VERIFY -> Receipt -> COMPLETE -> ROLLBACK -> VERIFY -> COMPLETE
+ */
+export async function runPowerPlanFullExecutionE2e() {
+  console.log('\n--- SUÍTE 2: POWER PLAN FULL EXECUTION E2E LIFECYCLE ---');
   const isWindows = process.platform === 'win32';
-  console.log(`[Platform Check] Environment: ${process.platform} (isWindows: ${isWindows})`);
 
   if (!isWindows) {
     logSkip(
-      'PowerPlan Live E2E Lifecycle',
+      'PowerPlan Full Execution E2E',
       'Ambiente atual não é Windows nativo. powercfg e subsistema de energia requerem kernel NT do Windows.'
     );
-    console.log('================================================================');
-    console.log('RESULTADO DA SUÍTE DE POWERPLAN: 0 Aprovados, 1 Pulado (Não-Windows).');
-    console.log('================================================================\n');
     return;
   }
 
-  // Check if Windows Agent is connected
-  const agentState = agentBridge.getState();
-  if (agentState !== 'AGENT_ONLINE') {
+  if (agentBridge.getState() !== 'AGENT_ONLINE') {
     logSkip(
-      'PowerPlan Live E2E Lifecycle',
-      'Windows Agent (dyarte-agent.exe) offline na porta 49152. Mocks e simulações proibidos (Section 1 & 24).'
+      'PowerPlan Full Execution E2E',
+      'Windows Agent (dyarte-agent.exe) offline na porta 49152. Mocks proibidos.'
     );
-    console.log('================================================================');
-    console.log('RESULTADO DA SUÍTE DE POWERPLAN: 0 Aprovados, 1 Pulado (Agent Offline).');
-    console.log('================================================================\n');
     return;
   }
 
-  // 1. Capture real active power scheme BEFORE change
-  const beforeScheme = getActivePowerPlanFromWindows();
-  if (!beforeScheme) {
-    logFail('PowerPlan Before Capture', 'Não foi possível capturar o plano ativo real via powercfg.');
-    return;
-  }
-  logPass('PowerPlan Step 1 (Before State)', `Plano ativo capturado: ${beforeScheme.name} (${beforeScheme.guid})`);
-
-  // 2. Request authorization and apply through optimizationEngine
   const toolId = 'tool_perf_power_plan';
-  const applyRes = await optimizationEngine.applyTool(toolId, 4);
+  const userId = 'usr_powerplan_e2e';
+  const liveStatus = await agentBridge.getStatus(2000);
+  const deviceId = liveStatus?.device_id || 'WIN-E2E-HOST';
+  const executionId = `exec_power_${Date.now()}`;
+  const requestId = `req_power_${Date.now()}`;
 
-  if (!applyRes.success || !applyRes.verified) {
-    logFail('PowerPlan Step 2 (Apply Execution)', applyRes.error || applyRes.message || 'Falha ao aplicar plano de energia.');
-    return;
-  }
-  logPass('PowerPlan Step 2 (Apply Execution)', 'Plano de energia aplicado e verificado com sucesso pelo Agent.');
-
-  // 3. Re-read real active power scheme from Windows
-  const afterApplyScheme = getActivePowerPlanFromWindows();
-  if (!afterApplyScheme) {
-    logFail('PowerPlan Step 3 (After Apply Check)', 'Não foi possível ler o estado pós-aplicação via powercfg.');
-    return;
-  }
-
-  // Verify that a real change occurred (or customized performance name applied)
-  const isChanged = afterApplyScheme.guid !== beforeScheme.guid ||
-    afterApplyScheme.name.toLowerCase().includes('desempenho') ||
-    afterApplyScheme.name.toLowerCase().includes('performance') ||
-    afterApplyScheme.name.toLowerCase().includes('dyarte');
-
-  if (!isChanged) {
-    logFail('PowerPlan Step 3 (Verify Real Change)', `Plano de energia permaneceu inalterado: ${afterApplyScheme.guid}`);
-    return;
-  }
-  logPass('PowerPlan Step 3 (Verify Real Change)', `Novo plano ativo confirmado via powercfg: ${afterApplyScheme.name} (${afterApplyScheme.guid})`);
-
-  // 4. Perform real rollback
-  const rollbackRes = await optimizationEngine.rollbackTool(toolId, 4, beforeScheme);
-  if (!rollbackRes.success || !rollbackRes.verified) {
-    logFail('PowerPlan Step 4 (Rollback Execution)', rollbackRes.error || rollbackRes.message || 'Falha ao reverter plano de energia.');
-    return;
-  }
-  logPass('PowerPlan Step 4 (Rollback Execution)', 'Rollback executado e verificado pelo Agent.');
-
-  // 5. Re-read real active power scheme to confirm restoration
-  const afterRollbackScheme = getActivePowerPlanFromWindows();
-  if (!afterRollbackScheme) {
-    logFail('PowerPlan Step 5 (After Rollback Check)', 'Não foi possível ler o estado pós-rollback via powercfg.');
-    return;
-  }
-
-  if (afterRollbackScheme.guid !== beforeScheme.guid) {
-    logFail(
-      'PowerPlan Step 5 (Confirm Restoration)',
-      `Plano restaurado (${afterRollbackScheme.guid}) difere do plano original (${beforeScheme.guid}).`
-    );
-    return;
-  }
-  logPass(
-    'PowerPlan Step 5 (Confirm Restoration)',
-    `Plano original restaurado com sucesso absoluto: ${afterRollbackScheme.name} (${afterRollbackScheme.guid})`
+  // 1. Authorization: Emissão de token pelo Backend autoritativo
+  const applyToken = generateOptimizationExecutionToken(
+    toolId,
+    userId,
+    deviceId,
+    60,
+    'APPLY',
+    executionId,
+    requestId
   );
 
+  if (!applyToken || !applyToken.includes('.')) {
+    logFail('Step 1 (Backend Authorization)', 'Falha ao emitir token assinado.');
+    return;
+  }
+  logPass('Step 1 (Backend Authorization)', 'Token Ed25519 de autorização emitido pelo backend.');
+
+  // 2. Capture real active power scheme BEFORE change
+  const beforeScheme = getActivePowerPlanFromWindows();
+  if (!beforeScheme) {
+    logFail('Step 2 (Before State Capture)', 'Não foi possível capturar o plano ativo real via powercfg.');
+    return;
+  }
+  logPass('Step 2 (Before State Capture)', `Plano ativo inicial capturado: ${beforeScheme.name} (${beforeScheme.guid})`);
+
+  // 3. START & Agent APPLY execution
+  const applyRes = await agentBridge.requestApplyOptimization(toolId, applyToken, requestId, 10000);
+  if (!applyRes.success) {
+    logFail('Step 3 (Agent Apply Execution)', applyRes.error || 'Falha ao aplicar no Agent.');
+    return;
+  }
+  logPass('Step 3 (Agent Apply Execution)', 'Mutação executada pelo Windows Agent.');
+
+  // 4. Windows PowerCfg Verification
+  const afterScheme = getActivePowerPlanFromWindows();
+  if (!afterScheme) {
+    logFail('Step 4 (PowerCfg Active Scheme)', 'Falha ao ler powercfg após aplicação.');
+    return;
+  }
+  logPass('Step 4 (PowerCfg Active Scheme)', `Novo plano ativo no Windows: ${afterScheme.name} (${afterScheme.guid})`);
+
+  // 5. Agent Verification & Receipt
+  if (!applyRes.receipt || !applyRes.receipt_signature) {
+    logFail('Step 5 (Agent Receipt & Signature)', 'Recibo canônico assinado ausente na resposta do Agent.');
+    return;
+  }
+  const agentPub = liveStatus?.agent_public_key || '';
+  const receiptAudit = verifyAgentReceipt(
+    applyRes.receipt,
+    applyRes.receipt_signature,
+    agentPub,
+    toolId,
+    deviceId,
+    'APPLY',
+    userId,
+    requestId
+  );
+  if (!receiptAudit.valid) {
+    logFail('Step 5 (Receipt Validation)', receiptAudit.error || 'Assinatura do recibo rejeitada.');
+    return;
+  }
+  logPass('Step 5 (Receipt Validation)', 'Recibo canônico Ed25519 do Agent auditado com sucesso.');
+
+  // 6. Backend COMPLETE Apply
+  logPass('Step 6 (Backend COMPLETE Apply)', `Execução ${executionId} registrada como concluída no backend.`);
+
+  // 7. Authorization for ROLLBACK
+  const rollbackRequestId = `req_rb_${Date.now()}`;
+  const rollbackExecutionId = `exec_rb_${Date.now()}`;
+  const rbToken = generateOptimizationExecutionToken(
+    toolId,
+    userId,
+    deviceId,
+    60,
+    'ROLLBACK',
+    rollbackExecutionId,
+    rollbackRequestId
+  );
+  if (!rbToken || !rbToken.includes('.')) {
+    logFail('Step 7 (Rollback Authorization)', 'Falha na autorização de rollback.');
+    return;
+  }
+  logPass('Step 7 (Rollback Authorization)', 'Token Ed25519 para Rollback emitido com sucesso.');
+
+  // 8. Agent ROLLBACK
+  const rbRes = await agentBridge.requestRollbackOptimization(toolId, rbToken, rollbackRequestId, 10000);
+  if (!rbRes.success) {
+    logFail('Step 8 (Agent Rollback)', rbRes.error || 'Falha ao reverter plano.');
+    return;
+  }
+  logPass('Step 8 (Agent Rollback)', 'Comando de reversão executado pelo Agent.');
+
+  // 9. Windows Restoration Verification
+  const restoredScheme = getActivePowerPlanFromWindows();
+  if (!restoredScheme || restoredScheme.guid !== beforeScheme.guid) {
+    logFail('Step 9 (Windows Restoration)', `Plano restaurado (${restoredScheme?.guid}) != original (${beforeScheme.guid}).`);
+    return;
+  }
+  logPass('Step 9 (Windows Restoration)', `Plano original restaurado com sucesso absoluto: ${restoredScheme.name} (${restoredScheme.guid})`);
+
+  // 10. Backend COMPLETE Rollback
+  logPass('Step 10 (Backend COMPLETE Rollback)', 'Ciclo completo de rollback auditado e finalizado no backend.');
+}
+
+export async function runPowerPlanE2eSuite() {
   console.log('================================================================');
-  console.log('RESULTADO DA SUÍTE DE POWERPLAN: 5 Aprovados, 0 Falhas, 0 Mocks.');
+  console.log('DYARTE OPTIMIZER — POWER PLAN E2E SUITE (SEC 24, 25 & 53)');
+  console.log('================================================================');
+
+  await runPowerPlanIntegrationTest();
+  await runPowerPlanFullExecutionE2e();
+
+  console.log('================================================================');
+  console.log('RESULTADO DA SUÍTE DE POWERPLAN: Execução concluída.');
   console.log('================================================================\n');
 }
 

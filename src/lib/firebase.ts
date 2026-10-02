@@ -9,6 +9,13 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
+googleAuthProvider.setCustomParameters({
+  prompt: 'select_account',
+});
+
+export const isElectronEnvironment = (): boolean => {
+  return typeof window !== 'undefined' && Boolean((window as any).dyarte?.ipc);
+};
 
 export enum OperationType {
   CREATE = 'create',

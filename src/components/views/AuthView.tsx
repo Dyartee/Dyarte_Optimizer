@@ -28,10 +28,13 @@ export const AuthView: React.FC = () => {
   const [forgotEmail, setForgotEmail] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
+  const [authError, setAuthError] = useState<string>('');
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAuthError('');
     if (!loginEmail || !loginPassword) {
+      setAuthError('Informe seu e-mail e senha cadastrados.');
       addToast('error', 'Campos Obrigatórios', 'Informe seu e-mail e senha.');
       return;
     }
@@ -40,6 +43,7 @@ export const AuthView: React.FC = () => {
     const result = await login(loginEmail, loginPassword);
     setIsLoading(false);
     if (!result.success && result.error) {
+      setAuthError(result.error);
       addToast('error', 'Falha no Acesso', result.error);
     }
   };
@@ -135,6 +139,16 @@ export const AuthView: React.FC = () => {
           {/* LOGIN FORM */}
           {mode === 'login' && (
             <form onSubmit={handleLoginSubmit} className="space-y-4">
+              {authError && (
+                <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/25 text-red-300 text-xs font-mono space-y-1 animate-fadeIn">
+                  <div className="font-bold flex items-center gap-1.5 text-red-400 uppercase">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    Aviso de Autenticação
+                  </div>
+                  <p className="leading-relaxed">{authError}</p>
+                </div>
+              )}
+
               <div>
                 <label className="text-[11px] font-mono text-zinc-400 uppercase block mb-1.5">
                   E-mail Cadastrado no Site:
@@ -145,7 +159,10 @@ export const AuthView: React.FC = () => {
                     type="email"
                     required
                     value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
+                    onChange={(e) => {
+                      setLoginEmail(e.target.value);
+                      if (authError) setAuthError('');
+                    }}
                     placeholder="seuemail@exemplo.com"
                     className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#09090d] border border-[#262635] text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-[#E00000]"
                   />
@@ -157,7 +174,10 @@ export const AuthView: React.FC = () => {
                   <label className="text-[11px] font-mono text-zinc-400 uppercase">Senha da Conta:</label>
                   <button
                     type="button"
-                    onClick={() => setMode('forgot')}
+                    onClick={() => {
+                      setAuthError('');
+                      setMode('forgot');
+                    }}
                     className="text-[11px] font-mono text-[#FF5555] hover:underline cursor-pointer"
                   >
                     Esqueceu a senha?
@@ -169,7 +189,10 @@ export const AuthView: React.FC = () => {
                     type="password"
                     required
                     value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
+                    onChange={(e) => {
+                      setLoginPassword(e.target.value);
+                      if (authError) setAuthError('');
+                    }}
                     placeholder="••••••••"
                     className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#09090d] border border-[#262635] text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-[#E00000]"
                   />
@@ -200,10 +223,12 @@ export const AuthView: React.FC = () => {
               <button
                 type="button"
                 onClick={async () => {
+                  setAuthError('');
                   setIsLoading(true);
                   const res = await loginWithGoogle();
                   setIsLoading(false);
                   if (!res.success && res.error) {
+                    setAuthError(res.error);
                     addToast('error', 'Falha com Google', res.error);
                   }
                 }}

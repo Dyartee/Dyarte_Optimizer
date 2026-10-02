@@ -41,7 +41,6 @@ import {
   getRedirectResult,
   onAuthStateChanged,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { agentBridge } from '../services/agentBridge';
 import { optimizationEngine } from '../services/optimizationEngine';
 
@@ -1266,28 +1265,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: 'Nenhuma sessão autenticada para sincronização.' };
       }
 
-      const userRef = doc(db, 'users', fbUser.uid);
-      const snap = await getDoc(userRef);
+      const idToken = await fbUser.getIdToken();
+      const resp = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
 
-      if (snap.exists()) {
-        const userData = snap.data() as User;
-        const refreshedUser: User = {
-          ...userData,
-          ultimo_login: `Sincronizado ${timeStr}`,
-        };
-        setCurrentUser(refreshedUser);
-        setUsers((prev) => prev.map((u) => (u.user_id === refreshedUser.user_id ? refreshedUser : u)));
-        setIsSyncingWithWeb(false);
-        addToast(
-          'success',
-          'Conta Sincronizada',
-          `Plano ${refreshedUser.plano_atual || 'BÁSICO'} atualizado diretamente do banco de dados.`
-        );
-        return { success: true, message: 'Dados sincronizados com o servidor.' };
-      } else {
-        setIsSyncingWithWeb(false);
-        return { success: false, message: 'Cadastro do usuário não encontrado na base de dados.' };
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.user) {
+          const refreshedUser: User = {
+            ...data.user,
+            ultimo_login: `Sincronizado ${timeStr}`,
+          };
+          setCurrentUser(refreshedUser);
+          setUsers((prev) => prev.map((u) => (u.user_id === refreshedUser.user_id ? refreshedUser : u)));
+          setIsSyncingWithWeb(false);
+          addToast(
+            'success',
+            'Conta Sincronizada',
+            `Plano ${refreshedUser.plano_atual || 'BÁSICO'} atualizado diretamente do servidor seguro.`
+          );
+          return { success: true, message: 'Dados sincronizados com o servidor.' };
+        }
       }
+      setIsSyncingWithWeb(false);
+      return { success: false, message: 'Cadastro do usuário não encontrado na base do servidor.' };
     } catch (err: any) {
       setIsSyncingWithWeb(false);
       return { success: false, message: `Erro ao conectar com servidor: ${err.message || 'Falha de rede'}` };
@@ -1310,8 +1312,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRedirectResult(auth)
       .then(async (result) => {
         if (result?.user) {
-          const idToken = await result.user.getIdToken();
           try {
+            const idToken = await result.user.getIdToken();
             const resp = await fetch('/api/auth/me', {
               headers: { Authorization: `Bearer ${idToken}` },
             });
@@ -1320,10 +1322,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               if (data.user) {
                 setCurrentUser(data.user);
                 localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
+              } else {
+                setCurrentUser(null);
+                localStorage.removeItem('dyarte_current_user');
               }
+            } else {
+              setCurrentUser(null);
+              localStorage.removeItem('dyarte_current_user');
             }
           } catch (e) {
             console.warn('[Redirect Auth Sync]', e);
+            setCurrentUser(null);
+            localStorage.removeItem('dyarte_current_user');
           }
         }
       })
@@ -1335,10 +1345,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser && fbUser.email) {
-        const emailLower = fbUser.email.toLowerCase();
-        const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || 'kelberduarte22@gmail.com').toLowerCase();
-        const isAdminEmail = Boolean(envAdmin && emailLower === envAdmin);
-
         try {
           // Authoritative verification via backend with Firebase ID Token
           const idToken = await fbUser.getIdToken();
@@ -1355,75 +1361,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               return;
             }
           }
+
+          // If backend verification fails or user not returned, do not authenticate locally
+          console.warn('[Backend Auth Verification Failed]: Backend returned status', backendRes.status);
+          setCurrentUser(null);
+          localStorage.removeItem('dyarte_current_user');
         } catch (backendErr) {
-          console.warn('[Backend Auth Verification Notice]: Fallback to direct Firestore sync.', backendErr);
-        }
-
-        // Fallback: Direct Firestore user document sync
-        try {
-          const userRef = doc(db, 'users', fbUser.uid);
-          const snap = await getDoc(userRef);
-
-          if (snap.exists()) {
-            const userData = snap.data() as User;
-            if (isAdminEmail && userData.role !== 'ADMIN') {
-              const promoted: User = {
-                ...userData,
-                role: 'ADMIN',
-                plano_atual: 'COMPLETO',
-                nivel_plano: 4,
-                status_plano: 'ATIVO',
-              };
-              try {
-                await setDoc(userRef, promoted, { merge: true });
-              } catch (mergeErr) {
-                console.warn('[Firestore Admin Sync Notice]:', mergeErr);
-              }
-              setCurrentUser(promoted);
-              localStorage.setItem('dyarte_current_user', JSON.stringify(promoted));
-            } else {
-              setCurrentUser(userData);
-              localStorage.setItem('dyarte_current_user', JSON.stringify(userData));
-            }
-          } else {
-            // New user registration profile initialization: Always starts at level 1 (BÁSICO, ATIVO)
-            const newUser: User = {
-              user_id: fbUser.uid,
-              nome: fbUser.displayName || (isAdminEmail ? 'Kelber Duarte' : emailLower.split('@')[0]),
-              email: emailLower,
-              data_criacao: new Date().toISOString().split('T')[0],
-              plano_atual: isAdminEmail ? 'COMPLETO' : 'BÁSICO',
-              nivel_plano: (isAdminEmail ? 4 : 1) as PlanLevel,
-              status_plano: 'ATIVO',
-              data_inicio: new Date().toISOString().split('T')[0],
-              data_expiracao: isAdminEmail ? '2030-12-31' : '-',
-              license_id: isAdminEmail ? 'lic_admin_duarte_master' : '',
-              status_licenca: isAdminEmail ? 'ATIVA' : 'INATIVA',
-              device_id: device.device_id || 'N/D',
-              ultimo_login: 'Agora mesmo',
-              role: isAdminEmail ? 'ADMIN' : 'USER',
-              status: 'ATIVO',
-            };
-            try {
-              await setDoc(userRef, newUser);
-              if (isAdminEmail) {
-                await setDoc(doc(db, 'admins', fbUser.uid), {
-                  user_id: fbUser.uid,
-                  email: emailLower,
-                  role: 'ADMIN',
-                  status: 'ACTIVE',
-                  granted_at: new Date().toISOString(),
-                  notes: 'Master administrator account initialized',
-                });
-              }
-            } catch (err) {
-              console.warn('[Firestore SetDoc Warning]', err);
-            }
-            setCurrentUser(newUser);
-            localStorage.setItem('dyarte_current_user', JSON.stringify(newUser));
-          }
-        } catch (e) {
-          console.warn('Firebase user sync note:', e);
+          console.warn('[Backend Auth Verification Offline/Error]:', backendErr);
+          setCurrentUser(null);
+          localStorage.removeItem('dyarte_current_user');
         } finally {
           setIsAuthLoading(false);
         }
@@ -1449,80 +1395,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const userCredential = await signInWithEmailAndPassword(auth, safeEmail, safePass);
       const fbUser = userCredential.user;
-      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
-      const isAdmin = Boolean(envAdmin && safeEmail === envAdmin);
+      const idToken = await fbUser.getIdToken();
 
-      // Load Firestore profile
-      let userData: User;
+      let backendRes: globalThis.Response;
       try {
-        const userRef = doc(db, 'users', fbUser.uid);
-        const snap = await getDoc(userRef);
-        if (snap.exists()) {
-          userData = snap.data() as User;
-          if (isAdmin && userData.role !== 'ADMIN') {
-            userData = { ...userData, role: 'ADMIN', plano_atual: 'COMPLETO', nivel_plano: 4 };
-            await setDoc(userRef, userData, { merge: true });
-          }
-        } else {
-          userData = {
-            user_id: fbUser.uid,
-            nome: fbUser.displayName || (isAdmin ? 'Kelber Duarte' : safeEmail.split('@')[0]),
-            email: safeEmail,
-            data_criacao: new Date().toISOString().split('T')[0],
-            plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
-            nivel_plano: (isAdmin ? 4 : 1) as PlanLevel,
-            status_plano: 'ATIVO',
-            data_inicio: new Date().toISOString().split('T')[0],
-            data_expiracao: isAdmin ? '2030-12-31' : 'Vitalício (Gratuito)',
-            license_id: isAdmin ? 'lic_admin_duarte_master' : `lic_free_${fbUser.uid.slice(0, 8)}`,
-            status_licenca: 'ATIVA',
-            device_id: device.device_id,
-            ultimo_login: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-            role: isAdmin ? 'ADMIN' : 'USER',
-            status: 'ATIVO',
-          };
-          await setDoc(userRef, userData);
-        }
-      } catch (err) {
-        // Fallback user representation if offline
-        userData = {
-          user_id: fbUser.uid,
-          nome: isAdmin ? 'Kelber Duarte' : safeEmail.split('@')[0],
-          email: safeEmail,
-          data_criacao: new Date().toISOString().split('T')[0],
-          plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
-          nivel_plano: (isAdmin ? 4 : 1) as PlanLevel,
-          status_plano: 'ATIVO',
-          data_inicio: new Date().toISOString().split('T')[0],
-          data_expiracao: isAdmin ? '2030-12-31' : 'Vitalício (Gratuito)',
-          license_id: isAdmin ? 'lic_admin_duarte_master' : `lic_free_${fbUser.uid.slice(0, 8)}`,
-          status_licenca: 'ATIVA',
-          device_id: device.device_id,
-          ultimo_login: 'Agora mesmo',
-          role: isAdmin ? 'ADMIN' : 'USER',
-          status: 'ATIVO',
+        backendRes = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+      } catch (fetchErr) {
+        console.error('[Login Backend Offline]', fetchErr);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
         };
       }
 
-      setCurrentUser(userData);
+      if (!backendRes.ok) {
+        console.error('[Login Backend Error]', backendRes.status);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
+      }
+
+      const data = await backendRes.json();
+      if (!data.user) {
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
+      }
+
+      setCurrentUser(data.user);
+      localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
       addToast(
         'success',
         'Autenticação Segura Concluída',
-        isAdmin ? 'Bem-vindo, Administrador Duarte! Acesso total concedido.' : `Bem-vindo de volta, ${userData.nome}!`
+        `Bem-vindo de volta, ${data.user.nome}!`
       );
       return { success: true };
     } catch (err: any) {
-      // Fallback for local initial accounts if needed
-      const targetUser = users.find((u) => (u?.email || '').toLowerCase() === safeEmail);
-      if (targetUser) {
-        if (targetUser.status === 'BLOQUEADO') {
-          return { success: false, error: 'Esta conta foi suspensa pela administração.' };
-        }
-        setCurrentUser(targetUser);
-        addToast('success', 'Sessão Iniciada', `Bem-vindo, ${targetUser.nome}!`);
-        return { success: true };
-      }
-
       let errMsg = 'Credenciais inválidas. Verifique seu e-mail e senha.';
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
         errMsg = 'E-mail ou senha incorretos.';
@@ -1592,52 +1513,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const cred = await createUserWithEmailAndPassword(auth, safeEmail, rawSenha);
       const fbUser = cred.user;
-      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || '').toLowerCase();
-      const isAdmin = Boolean(envAdmin && safeEmail === envAdmin);
+      const idToken = await fbUser.getIdToken();
 
-      const newUser: User = {
-        user_id: fbUser.uid,
-        nome: safeNome,
-        email: safeEmail,
-        data_criacao: new Date().toISOString().split('T')[0],
-        plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
-        nivel_plano: (isAdmin ? 4 : 1) as PlanLevel,
-        status_plano: 'ATIVO',
-        data_inicio: new Date().toISOString().split('T')[0],
-        data_expiracao: isAdmin ? '2030-12-31' : 'Vitalício (Gratuito)',
-        license_id: isAdmin ? 'lic_admin_duarte_master' : `lic_free_${fbUser.uid.slice(0, 8)}`,
-        status_licenca: 'ATIVA',
-        device_id: device.device_id,
-        ultimo_login: 'Agora mesmo',
-        role: isAdmin ? 'ADMIN' : 'USER',
-        status: 'ATIVO',
-      };
-
+      let backendRes: globalThis.Response;
       try {
-        await setDoc(doc(db, 'users', fbUser.uid), newUser);
-        if (isAdmin) {
-          await setDoc(doc(db, 'admins', fbUser.uid), {
-            user_id: fbUser.uid,
-            email: safeEmail,
-            role: 'ADMIN',
-            status: 'ACTIVE',
-            granted_at: new Date().toISOString(),
-            notes: 'Master administrator account registered',
-          });
-        }
-      } catch (dbErr) {
-        console.warn('Firestore write warning:', dbErr);
+        backendRes = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+      } catch (fetchErr) {
+        console.error('[Register Backend Offline]', fetchErr);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua conta com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
       }
 
-      setUsers((prev) => [...prev, newUser]);
-      setCurrentUser(newUser);
+      if (!backendRes.ok) {
+        console.error('[Register Backend Error]', backendRes.status);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua conta com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
+      }
+
+      const data = await backendRes.json();
+      if (!data.user) {
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível inicializar seu perfil no servidor.',
+        };
+      }
+
+      setCurrentUser(data.user);
+      localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
 
       addToast(
         'success',
         'Conta Criada com Criptografia Segura!',
-        isAdmin
-          ? 'Conta Master criada e vinculada como Administrador do sistema!'
-          : 'Conta criada! Você pode explorar todas as funções técnicas. Adquira um plano para executar no Windows.'
+        'Conta criada! Você pode explorar todas as funções técnicas. Adquira um plano para executar no Windows.'
       );
       return { success: true };
     } catch (err: any) {
@@ -1668,82 +1590,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw popupErr;
       }
 
+      if (!fbUser) {
+        throw new Error('Falha ao obter credenciais do usuário Google.');
+      }
+
       // Validar token no Backend autoritativo
+      const idToken = await fbUser.getIdToken();
+      let backendRes: globalThis.Response;
       try {
-        const idToken = await fbUser.getIdToken();
-        const backendRes = await fetch('/api/auth/me', {
+        backendRes = await fetch('/api/auth/me', {
           headers: { Authorization: `Bearer ${idToken}` },
         });
-
-        if (backendRes.ok) {
-          const data = await backendRes.json();
-          if (data.user) {
-            setCurrentUser(data.user);
-            localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
-            addToast('success', 'Autenticado com Google', `Bem-vindo, ${data.user.nome}!`);
-            return { success: true };
-          }
-        }
-      } catch (beErr) {
-        console.warn('[Backend Auth Verification]', beErr);
-      }
-
-      // Fallback: carregar ou inicializar usuário via Firestore direto
-      const emailLower = (fbUser.email || '').toLowerCase();
-      const envAdmin = (import.meta.env.VITE_INITIAL_ADMIN_EMAIL || 'kelberduarte22@gmail.com').toLowerCase();
-      const isAdmin = Boolean(envAdmin && emailLower === envAdmin);
-
-      const userRef = doc(db, 'users', fbUser.uid);
-      const snap = await getDoc(userRef);
-      let userData: User;
-
-      if (snap.exists()) {
-        userData = snap.data() as User;
-        if (isAdmin && userData.role !== 'ADMIN') {
-          userData = { ...userData, role: 'ADMIN', plano_atual: 'COMPLETO', nivel_plano: 4 };
-          try {
-            await setDoc(userRef, userData, { merge: true });
-          } catch (mergeErr) {
-            console.warn('[Firestore Admin Sync Notice]:', mergeErr);
-          }
-        }
-      } else {
-        userData = {
-          user_id: fbUser.uid,
-          nome: fbUser.displayName || (isAdmin ? 'Kelber Duarte' : emailLower.split('@')[0]),
-          email: emailLower,
-          data_criacao: new Date().toISOString().split('T')[0],
-          plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
-          nivel_plano: (isAdmin ? 4 : 1) as PlanLevel,
-          status_plano: 'ATIVO',
-          data_inicio: new Date().toISOString().split('T')[0],
-          data_expiracao: isAdmin ? '2030-12-31' : '-',
-          license_id: isAdmin ? 'lic_admin_duarte_master' : '',
-          status_licenca: isAdmin ? 'ATIVA' : 'INATIVA',
-          device_id: device.device_id || 'N/D',
-          ultimo_login: 'Agora mesmo',
-          role: isAdmin ? 'ADMIN' : 'USER',
-          status: 'ATIVO',
+      } catch (fetchErr) {
+        console.error('[Google Login Backend Offline]', fetchErr);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
         };
-        try {
-          await setDoc(userRef, userData);
-          if (isAdmin) {
-            await setDoc(doc(db, 'admins', fbUser.uid), {
-              user_id: fbUser.uid,
-              email: emailLower,
-              role: 'ADMIN',
-              status: 'ACTIVE',
-              granted_at: new Date().toISOString(),
-            });
-          }
-        } catch (dbErr) {
-          console.warn('[Firestore SetDoc Warning]:', dbErr);
-        }
       }
 
-      setCurrentUser(userData);
-      localStorage.setItem('dyarte_current_user', JSON.stringify(userData));
-      addToast('success', 'Autenticado com Google', `Bem-vindo, ${userData.nome}!`);
+      if (!backendRes.ok) {
+        console.error('[Google Login Backend Error]', backendRes.status);
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
+      }
+
+      const data = await backendRes.json();
+      if (!data.user) {
+        await signOut(auth);
+        setCurrentUser(null);
+        localStorage.removeItem('dyarte_current_user');
+        return {
+          success: false,
+          error: 'Não foi possível validar sua sessão com o servidor DYARTE. Verifique sua conexão e tente novamente.',
+        };
+      }
+
+      setCurrentUser(data.user);
+      localStorage.setItem('dyarte_current_user', JSON.stringify(data.user));
+      addToast('success', 'Autenticado com Google', `Bem-vindo, ${data.user.nome}!`);
       return { success: true };
     } catch (err: any) {
       // Log técnico seguro: código e mensagem de erro SEM vazar credenciais ou tokens

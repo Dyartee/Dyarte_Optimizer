@@ -98,7 +98,7 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     req.user = decoded;
 
     const userEmail = (decoded.email || '').toLowerCase();
-    const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || process.env.VITE_INITIAL_ADMIN_EMAIL || 'kelberduarte22@gmail.com')
+    const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || '')
       .split(',')
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean);

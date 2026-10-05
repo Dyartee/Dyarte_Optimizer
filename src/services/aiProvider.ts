@@ -19,6 +19,7 @@ import {
   SoftwareAnalysisResult,
 } from '../types/software';
 import { SoftwareInventoryService } from './softwareInventoryService';
+import { auth } from '../lib/firebase';
 
 export interface IAiProvider {
   readonly providerName: string;
@@ -77,9 +78,21 @@ export class ClientBackendAiProvider implements IAiProvider {
     const sanitized = SoftwareInventoryService.sanitizeForAi(items);
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (auth.currentUser) {
+        try {
+          const idToken = await auth.currentUser.getIdToken();
+          if (idToken) {
+            headers['Authorization'] = `Bearer ${idToken}`;
+          }
+        } catch (tokenErr) {
+          console.warn('[AI Provider] Could not get user ID token:', tokenErr);
+        }
+      }
+
       const response = await fetch('/api/software/classify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ items: sanitized }),
       });
 

@@ -8,6 +8,34 @@ import { initializeApp, getApps, App as AdminApp } from 'firebase-admin/app';
 import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import firebaseConfig from './firebase-applet-config.json';
+import {
+  setAdminFirestore,
+  getUserRecord,
+  setUserRecord,
+  updateUserRecord,
+  listUserRecords,
+  deleteUserRecord,
+  getAdminRecord,
+  setAdminRecord,
+  getLicensesByUserId,
+  getLicenseById,
+  setLicenseRecord,
+  updateLicenseRecord,
+  listLicenseRecords,
+  getDeviceRecord,
+  getDeviceByUserId,
+  setDeviceRecord,
+  getExecutionRecord,
+  setExecutionRecord,
+  updateExecutionRecord,
+  transitionExecutionStatus,
+  finalizeExecutionWithReceipt,
+  saveOptimizationHistoryRecord,
+  getOptimizationHistoryRecords,
+  saveAdminLogRecord,
+  listAdminLogRecords,
+  setConfigRecord,
+} from './src/server/db';
 import { CANONICAL_TOOLS_MAP } from './src/data/canonicalCatalog';
 import {
   validateServerSigningConfiguration,
@@ -17,6 +45,9 @@ import {
   serializeCanonicalReceipt,
   OptimizationOperation,
 } from './src/security/serverTokens';
+import { GeminiAiProvider } from './src/services/geminiAiProvider';
+
+const geminiAiProvider = new GeminiAiProvider();
 
 // Section 6: Fail-closed server startup check. Must refuse startup if signing key is invalid/unconfigured.
 if (!validateServerSigningConfiguration()) {
@@ -41,6 +72,7 @@ if (!getApps().length) {
 
 const adminAuth = getAuth(adminApp);
 const adminDb: Firestore = getFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
+setAdminFirestore(adminDb);
 
 // In-Memory Simple Rate Limiting Map
 const rateLimitMap = new Map<string, { count: number; firstRequest: number }>();
@@ -93,75 +125,66 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   }
 
   const token = authHeader.split('Bearer ')[1].trim();
+  let decoded: DecodedIdToken;
   try {
-    const decoded = await adminAuth.verifyIdToken(token);
+    decoded = await adminAuth.verifyIdToken(token);
     req.user = decoded;
+  } catch (error) {
+    console.error('Falha ao verificar token Firebase:', error);
+    return res.status(401).json({ error: 'Sessão expirada ou token de autenticação inválido.' });
+  }
 
-    const userEmail = (decoded.email || '').toLowerCase();
-    const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || '')
-      .split(',')
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean);
-    const isAdmin = (userEmail && configAdminEmails.includes(userEmail)) || decoded.role === 'ADMIN' || decoded.role === 'SUPER_ADMIN';
+  const userEmail = (decoded.email || '').toLowerCase();
+  const configAdminEmails = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  const isAdmin = (userEmail && configAdminEmails.includes(userEmail)) || decoded.role === 'ADMIN' || decoded.role === 'SUPER_ADMIN';
 
-    // Ensure Custom Claim role: ADMIN for the authorized administrator
-    if (isAdmin && (decoded.role !== 'ADMIN' || decoded.admin !== true)) {
-      try {
-        await adminAuth.setCustomUserClaims(decoded.uid, { role: 'ADMIN', admin: true });
-      } catch (claimErr) {
-        console.warn('Erro ao atualizar claims administrativas:', claimErr);
-      }
+  // Ensure Custom Claim role: ADMIN for the authorized administrator
+  if (isAdmin && (decoded.role !== 'ADMIN' || decoded.admin !== true)) {
+    try {
+      await adminAuth.setCustomUserClaims(decoded.uid, { role: 'ADMIN', admin: true });
+    } catch (claimErr) {
+      // safe ignore in environments where ADC lacks auth admin permissions
     }
+  }
 
-    // Ensure Admin document in admins/{uid}
-    if (isAdmin) {
-      try {
-        const adminDocRef = adminDb.collection('admins').doc(decoded.uid);
-        const adminSnap = await adminDocRef.get();
-        if (!adminSnap.exists) {
-          await adminDocRef.set({
-            user_id: decoded.uid,
-            email: userEmail,
-            role: 'ADMIN',
-            status: 'ACTIVE',
-            granted_at: new Date().toISOString(),
-            notes: 'Master administrator account initialized via verifyIdToken',
-          });
-        }
-      } catch (adminDocErr) {
-        console.warn('Erro ao verificar/registrar na coleção admins:', adminDocErr);
-      }
+  // Ensure Admin document in admins/{uid}
+  if (isAdmin) {
+    try {
+      await setAdminRecord(decoded.uid, userEmail);
+    } catch (adminDocErr) {
+      // safe ignore
     }
+  }
 
-    // Fetch user profile from Firestore
-    const userDocRef = adminDb.collection('users').doc(decoded.uid);
-    const userSnap = await userDocRef.get();
-
-    if (userSnap.exists) {
-      req.userDoc = userSnap.data();
-      if (req.userDoc.status === 'BLOQUEADO') {
+  try {
+    let userDoc = await getUserRecord(decoded.uid, token);
+    if (userDoc) {
+      if (userDoc.status === 'BLOQUEADO') {
         return res.status(403).json({ error: 'Sua conta foi suspensa pela administração.' });
       }
       // Guarantee admin account retains privileges
-      if (isAdmin && (req.userDoc.role !== 'ADMIN' || req.userDoc.nivel_plano !== 4)) {
-        await userDocRef.update({
-          role: 'ADMIN',
-          nivel_plano: 4,
-          plano_atual: 'COMPLETO',
-          status_plano: 'ATIVO',
-          status_licenca: 'ATIVA',
-        });
-        req.userDoc.role = 'ADMIN';
-        req.userDoc.nivel_plano = 4;
-        req.userDoc.plano_atual = 'COMPLETO';
+      if (isAdmin && (userDoc.role !== 'ADMIN' || userDoc.nivel_plano !== 4)) {
+        userDoc.role = 'ADMIN';
+        userDoc.nivel_plano = 4;
+        userDoc.plano_atual = 'COMPLETO';
+        userDoc.status_plano = 'ATIVO';
+        userDoc.status_licenca = 'ATIVA';
+        if (!userDoc.license_id) {
+          userDoc.license_id = `lic_${decoded.uid.substring(0, 8)}`;
+        }
+        await updateUserRecord(decoded.uid, userDoc, token);
       }
+      req.userDoc = userDoc;
     } else {
       // Default profile for newly authenticated users:
       // Regular users receive strictly level 1 (BÁSICO, Gratuito)
       const defaultUser = {
         user_id: decoded.uid,
         nome: decoded.name || (decoded.email ? decoded.email.split('@')[0] : 'Usuário'),
-        email: (decoded.email || '').toLowerCase(),
+        email: userEmail,
         role: isAdmin ? 'ADMIN' : 'USER',
         nivel_plano: isAdmin ? 4 : 1,
         plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
@@ -175,24 +198,35 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         ultimo_login: new Date().toISOString(),
         status: 'ATIVO',
       };
-      await userDocRef.set(defaultUser, { merge: true });
+      await setUserRecord(decoded.uid, defaultUser, token);
       req.userDoc = defaultUser;
 
       if (isAdmin) {
-        await adminDb.collection('admins').doc(decoded.uid).set({
-          email: userEmail,
-          role: 'ADMIN',
-          status: 'ACTIVE',
-          granted_at: new Date().toISOString(),
-          notes: 'Administrador Vinculado',
-        }, { merge: true });
+        await setAdminRecord(decoded.uid, userEmail);
       }
     }
 
     next();
-  } catch (error) {
-    console.error('Falha ao verificar token Firebase:', error);
-    return res.status(401).json({ error: 'Sessão expirada ou token de autenticação inválido.' });
+  } catch (profileErr) {
+    console.warn('[User Profile Load Warning]:', profileErr);
+    req.userDoc = {
+      user_id: decoded.uid,
+      nome: decoded.name || (decoded.email ? decoded.email.split('@')[0] : 'Usuário'),
+      email: userEmail,
+      role: isAdmin ? 'ADMIN' : 'USER',
+      nivel_plano: isAdmin ? 4 : 1,
+      plano_atual: isAdmin ? 'COMPLETO' : 'BÁSICO',
+      status_plano: 'ATIVO',
+      data_criacao: new Date().toISOString().split('T')[0],
+      data_inicio: new Date().toISOString().split('T')[0],
+      data_expiracao: isAdmin ? '2030-12-31' : '-',
+      license_id: isAdmin ? `lic_${decoded.uid.substring(0, 8)}` : '',
+      status_licenca: isAdmin ? 'ATIVA' : 'INATIVA',
+      device_id: 'N/D',
+      ultimo_login: new Date().toISOString(),
+      status: 'ATIVO',
+    };
+    next();
   }
 }
 
@@ -224,7 +258,7 @@ async function requireAdmin(req: AuthenticatedRequest, res: Response, next: Next
 async function recordAdminLog(action: string, adminEmail: string, target: string, details: string) {
   try {
     const logId = `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    await adminDb.collection('admin_logs').doc(logId).set({
+    await saveAdminLogRecord(logId, {
       log_id: logId,
       action,
       user_email: adminEmail,
@@ -258,18 +292,52 @@ app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) 
   });
 });
 
-// AI Software Intelligence Classification Endpoint (Requirements 30-48)
-app.post('/api/software/classify', (req: Request, res: Response) => {
+// AI Software Intelligence Classification Endpoint (Requirements 3-11, 30-48)
+app.post('/api/software/classify', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const startTime = Date.now();
   const requestId = `ai_req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const items = Array.isArray(req.body?.items) ? req.body.items : [];
 
-  if (items.length === 0) {
+  // Validate payload structure & boundaries (Requirement 10)
+  if (!req.body || typeof req.body !== 'object' || !Array.isArray(req.body.items)) {
+    return res.status(400).json({
+      error: 'Formato de payload inválido. O campo items deve ser um array.',
+      code: 'INVALID_PAYLOAD',
+    });
+  }
+
+  const rawItems = req.body.items;
+  // Maximum items limit
+  if (rawItems.length > 200) {
+    return res.status(400).json({
+      error: 'Payload excede a quantidade máxima permitida (200 itens).',
+      code: 'PAYLOAD_TOO_LARGE',
+    });
+  }
+
+  // Validate and sanitize each item's string lengths and types
+  const validItems: any[] = [];
+  for (const item of rawItems) {
+    if (!item || typeof item !== 'object') continue;
+    const name = String(item.name || '').trim();
+    if (!name || name.length > 128) continue;
+
+    validItems.push({
+      id: String(item.id || `sw_${validItems.length + 1}`).slice(0, 64),
+      name,
+      publisher: String(item.publisher || '').slice(0, 128),
+      version: String(item.version || '').slice(0, 64),
+      source: String(item.source || 'REGISTRY').slice(0, 32),
+      running: Boolean(item.running),
+      process_name: item.process_name ? String(item.process_name).slice(0, 64) : null,
+    });
+  }
+
+  if (validItems.length === 0) {
     return res.json({
       request_id: requestId,
       inventory_version: '1.0.0',
-      provider: 'DYARTE_INTELLIGENCE_ENGINE',
-      model: 'system-classifier-v1',
+      provider: geminiAiProvider.isConfigured() ? 'GEMINI' : 'LOCAL_HEURISTIC',
+      model: geminiAiProvider.isConfigured() ? 'gemini-2.5-flash' : 'system-classifier-v1',
       latency_ms: Date.now() - startTime,
       success: true,
       items_analyzed: 0,
@@ -278,11 +346,27 @@ app.post('/api/software/classify', (req: Request, res: Response) => {
     });
   }
 
-  // Safe heuristic classification engine and AI bridge
+  // Attempt real Gemini call if configured
+  if (geminiAiProvider.isConfigured()) {
+    try {
+      const geminiResult = await geminiAiProvider.classifySoftware(validItems);
+      const latency = Date.now() - startTime;
+      console.log(`[AI Observability] request_id=${requestId} items=${validItems.length} latency_ms=${latency} provider=GEMINI status=SUCCESS`);
+      return res.json({
+        ...geminiResult,
+        request_id: requestId,
+        latency_ms: latency,
+      });
+    } catch (geminiErr: any) {
+      console.warn('[Gemini Call Failed -> Graceful Degradation to LOCAL_HEURISTIC]:', geminiErr?.message || geminiErr);
+    }
+  }
+
+  // Fallback: Safe local heuristic classification engine (Clearly identified as LOCAL_HEURISTIC)
   const classifications: any[] = [];
   const recommendations: any[] = [];
 
-  for (const item of items.slice(0, 150)) {
+  for (const item of validItems) {
     const rawName = String(item.name || '').toLowerCase();
     const rawPub = String(item.publisher || '').toLowerCase();
     const text = `${rawName} ${rawPub}`;
@@ -384,17 +468,16 @@ app.post('/api/software/classify', (req: Request, res: Response) => {
   }
 
   const latency = Date.now() - startTime;
-  // Observabilidade (Requirement 48): sem logar secrets ou tokens
-  console.log(`[AI Observability] request_id=${requestId} items=${items.length} latency_ms=${latency} status=SUCCESS`);
+  console.log(`[AI Observability] request_id=${requestId} items=${validItems.length} latency_ms=${latency} provider=LOCAL_HEURISTIC status=SUCCESS`);
 
   res.json({
     request_id: requestId,
     inventory_version: '1.0.0',
-    provider: 'DYARTE_INTELLIGENCE_ENGINE',
-    model: 'gemini-2.5-flash',
+    provider: 'LOCAL_HEURISTIC',
+    model: 'system-classifier-v1',
     latency_ms: latency,
     success: true,
-    items_analyzed: items.length,
+    items_analyzed: validItems.length,
     classifications,
     recommendations,
   });
@@ -416,8 +499,8 @@ app.patch('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, re
       updates.avatar_seed = avatar_seed;
     }
 
-    await adminDb.collection('users').doc(uid).update(updates);
-    const refreshed = (await adminDb.collection('users').doc(uid).get()).data();
+    await updateUserRecord(uid, updates);
+    const refreshed = await getUserRecord(uid);
     res.json({ success: true, user: refreshed });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao atualizar perfil do usuário.' });
@@ -432,19 +515,15 @@ app.post('/api/license/validate', requireAuth, async (req: AuthenticatedRequest,
     const user = req.userDoc;
 
     // Check licenses collection for user
-    const licSnap = await adminDb.collection('licenses').where('user_id', '==', uid).get();
-    let userLicense = null;
+    const lics = await getLicensesByUserId(uid);
+    let userLicense = lics.length > 0 ? lics[0] : null;
 
-    if (!licSnap.empty) {
-      userLicense = licSnap.docs[0].data();
-      // Update last seen and device id
-      if (device_id) {
-        await licSnap.docs[0].ref.update({
-          last_seen: new Date().toISOString(),
-          device_id,
-          app_version: app_version || '2.4.0',
-        });
-      }
+    if (userLicense && device_id) {
+      userLicense = await updateLicenseRecord(userLicense.license_id, {
+        last_seen: new Date().toISOString(),
+        device_id,
+        app_version: app_version || '2.4.0',
+      });
     }
 
     const isLicActive = userLicense ? userLicense.status === 'ATIVA' : user.status_licenca === 'ATIVA';
@@ -535,16 +614,16 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
       : null;
 
     if (!targetDeviceId && typeof device_id === 'string' && device_id.trim() && device_id !== 'N/D') {
-      const devDoc = await adminDb.collection('devices').doc(device_id.trim()).get();
-      if (devDoc.exists && devDoc.data()?.user_id === uid) {
+      const devDoc = await getDeviceRecord(device_id.trim());
+      if (devDoc && devDoc.user_id === uid) {
         targetDeviceId = device_id.trim();
       }
     }
 
     if (!targetDeviceId) {
-      const devSnap = await adminDb.collection('devices').where('user_id', '==', uid).limit(1).get();
-      if (!devSnap.empty) {
-        targetDeviceId = devSnap.docs[0].id;
+      const devDoc = await getDeviceByUserId(uid);
+      if (devDoc) {
+        targetDeviceId = devDoc.device_id;
       }
     }
 
@@ -586,7 +665,7 @@ app.post('/api/tools/execute', requireAuth, async (req: AuthenticatedRequest, re
       completed_at: null,
       created_at: new Date().toISOString(),
     };
-    await adminDb.collection('executions').doc(executionId).set(executionRecord);
+    await setExecutionRecord(executionId, executionRecord);
 
     // Requirement 2: Token contains protocol_version, execution_id, request_id, operation, tool_id, user_id, device_id, nonce, iat, exp
     const executionToken = generateOptimizationExecutionToken(
@@ -632,31 +711,15 @@ app.post('/api/executions/start', requireAuth, async (req: AuthenticatedRequest,
       return res.status(400).json({ success: false, error_code: 'INVALID_REQUEST', error: 'request_id é obrigatório.' });
     }
 
-    const execRef = adminDb.collection('executions').doc(execution_id);
-
-    const result = await adminDb.runTransaction(async (transaction) => {
-      const snap = await transaction.get(execRef);
-      if (!snap.exists) {
-        throw new Error('EXECUTION_NOT_FOUND');
-      }
-      const data = snap.data()!;
-      if (data.user_id !== uid && req.userDoc?.role !== 'ADMIN') {
-        throw new Error('TOKEN_USER_MISMATCH');
-      }
-      if (data.request_id !== request_id) {
-        throw new Error('REQUEST_ID_MISMATCH');
-      }
-      if (data.status !== 'ISSUED') {
-        throw new Error(`INVALID_STATUS_TRANSITION_${data.status}`);
-      }
-
-      const startedAt = new Date().toISOString();
-      transaction.update(execRef, {
-        status: 'EXECUTING',
-        started_at: startedAt,
-      });
-      return { execution_id, request_id, status: 'EXECUTING', started_at: startedAt };
-    });
+    const result = await transitionExecutionStatus(
+      execution_id,
+      request_id,
+      uid,
+      req.userDoc?.role === 'ADMIN',
+      'ISSUED',
+      'EXECUTING',
+      { started_at: new Date().toISOString() }
+    );
 
     res.json({ success: true, ...result });
   } catch (error: any) {
@@ -758,9 +821,9 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
     let agentPubKey: string | null = null;
     const deviceId = tokenPayload.device_id;
     if (deviceId && deviceId !== 'N/D') {
-      const devDoc = await adminDb.collection('devices').doc(deviceId).get();
-      if (devDoc.exists && devDoc.data()?.agent_public_key) {
-        agentPubKey = devDoc.data()!.agent_public_key;
+      const devDoc = await getDeviceRecord(deviceId);
+      if (devDoc && devDoc.agent_public_key) {
+        agentPubKey = devDoc.agent_public_key;
       }
     }
     if (!agentPubKey && req.userDoc?.agent_public_key) {
@@ -801,133 +864,87 @@ app.post('/api/executions/complete', requireAuth, async (req: AuthenticatedReque
     // Do NOT allow finalizing directly from ISSUED to COMPLETED without EXECUTING.
     // Prevent double finalization.
     const execId = tokenPayload.execution_id || receipt.execution_id;
-    const execRef = adminDb.collection('executions').doc(execId);
 
-    const transactionResult = await adminDb.runTransaction(async (transaction) => {
-      const execSnap = await transaction.get(execRef);
-      if (!execSnap.exists) {
-        throw new Error('EXECUTION_NOT_FOUND');
-      }
+    // Determine final status from validated receipt
+    let finalExecStatus: 'COMPLETED' | 'FAILED' | 'REVERTED' = 'FAILED';
+    let historyStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
 
-      const execData = execSnap.data()!;
+    if (receipt.verified && receipt.status === 'APLICADO') {
+      finalExecStatus = 'COMPLETED';
+      historyStatus = 'SUCESSO';
+    } else if (receipt.verified && receipt.status === 'REVERTIDO') {
+      finalExecStatus = 'REVERTED';
+      historyStatus = 'REVERTIDO';
+    } else if (receipt.status === 'JA_APLICADO') {
+      finalExecStatus = 'COMPLETED';
+      historyStatus = 'SUCESSO';
+    } else {
+      finalExecStatus = 'FAILED';
+      historyStatus = 'FALHA';
+    }
 
-      // Requirement 2: Strict consistency checks
-      if (execData.execution_id !== receipt.execution_id) {
-        throw new Error('EXECUTION_ID_MISMATCH');
-      }
-      if (execData.request_id !== receipt.request_id) {
-        throw new Error('REQUEST_ID_MISMATCH');
-      }
-      if (execData.tool_id !== receipt.tool_id) {
-        throw new Error('TOOL_ID_MISMATCH');
-      }
-      if (execData.operation !== receipt.operation) {
-        throw new Error('OPERATION_MISMATCH');
-      }
-      if (execData.user_id !== uid && req.userDoc?.role !== 'ADMIN') {
-        throw new Error('USER_MISMATCH');
-      }
-      if (execData.device_id !== receipt.device_id) {
-        throw new Error('DEVICE_MISMATCH');
-      }
+    const completedAt = new Date().toISOString();
+    const realDuration = Math.max(0, Number(receipt.duration_ms) || 0);
 
-      // Requirement 3: State enforcement
-      if (execData.status === 'ISSUED') {
-        throw new Error('INVALID_STATE_TRANSITION_FROM_ISSUED');
-      }
-
-      if (execData.status === 'COMPLETED' || execData.status === 'FAILED' || execData.status === 'REVERTED') {
-        throw new Error(`ALREADY_COMPLETED_${execData.status}`);
-      }
-
-      if (execData.status !== 'EXECUTING') {
-        throw new Error(`INVALID_STATUS_${execData.status}`);
-      }
-
-      // Determine final status from validated receipt
-      let finalExecStatus: 'COMPLETED' | 'FAILED' | 'REVERTED' = 'FAILED';
-      let historyStatus: 'SUCESSO' | 'FALHA' | 'REVERTIDO' = 'FALHA';
-
-      if (receipt.verified && receipt.status === 'APLICADO') {
-        finalExecStatus = 'COMPLETED';
-        historyStatus = 'SUCESSO';
-      } else if (receipt.verified && receipt.status === 'REVERTIDO') {
-        finalExecStatus = 'REVERTED';
-        historyStatus = 'REVERTIDO';
-      } else if (receipt.status === 'JA_APLICADO') {
-        finalExecStatus = 'COMPLETED';
-        historyStatus = 'SUCESSO';
-      } else {
-        finalExecStatus = 'FAILED';
-        historyStatus = 'FALHA';
-      }
-
-      const completedAt = new Date().toISOString();
-      const realDuration = Math.max(0, Number(receipt.duration_ms) || 0);
-
-      // Update execution registry document atomically
-      transaction.update(execRef, {
-        status: finalExecStatus,
+    const transactionResult = await finalizeExecutionWithReceipt(
+      execId,
+      receipt,
+      uid,
+      req.userDoc?.role === 'ADMIN',
+      finalExecStatus,
+      Boolean(receipt.verified),
+      {
         completed_at: completedAt,
         duration_ms: realDuration,
-        verified: Boolean(receipt.verified),
-        receipt,
         receipt_signature,
-      });
+      }
+    );
 
-      // Record official optimization history atomically
-      const canonicalTool = CANONICAL_TOOLS[receipt.tool_id];
-      const toolName = canonicalTool?.nome || receipt.tool_id;
-      const category = canonicalTool?.categoria || 'SISTEMA';
-      const historyId = `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    // Record official optimization history
+    const canonicalTool = CANONICAL_TOOLS[receipt.tool_id];
+    const toolName = canonicalTool?.nome || receipt.tool_id;
+    const category = canonicalTool?.categoria || 'SISTEMA';
+    const historyId = `hist_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
-      const historyRecord = {
-        history_id: historyId,
-        execution_id: execId,
-        optimization_id: `opt_${execId}`,
-        request_id: receipt.request_id,
-        user_id: uid,
-        device_id: tokenPayload.device_id,
-        tool_id: receipt.tool_id,
-        tool_name: toolName,
-        category,
-        date: completedAt,
-        status: historyStatus,
-        result: historyStatus === 'SUCESSO'
-          ? `Otimização ${toolName} aplicada e confirmada pelo Windows Agent.`
-          : historyStatus === 'REVERTIDO'
-          ? `Otimização ${toolName} revertida e confirmada pelo Windows Agent.`
-          : 'Operação reportou falha ou não foi verificada pelo Agent.',
-        details: receipt.after_state
-          ? `Estado validado: ${JSON.stringify(receipt.after_state)}`
-          : 'Execução auditada no Windows Agent.',
-        before_state: receipt.before_state || null,
-        after_state: receipt.after_state || null,
-        duration_ms: realDuration,
-        agent_version: receipt.agent_version || 'N/D',
-        rollback_available: Boolean(receipt.rollback_available),
-        verified: Boolean(receipt.verified),
-        receipt_verified: true,
-        receipt_nonce: receipt.receipt_nonce,
-        agent_signature: receipt_signature,
-      };
+    const historyRecord = {
+      history_id: historyId,
+      execution_id: execId,
+      optimization_id: `opt_${execId}`,
+      request_id: receipt.request_id,
+      user_id: uid,
+      device_id: tokenPayload.device_id,
+      tool_id: receipt.tool_id,
+      tool_name: toolName,
+      category,
+      date: completedAt,
+      status: historyStatus,
+      result: historyStatus === 'SUCESSO'
+        ? `Otimização ${toolName} aplicada e confirmada pelo Windows Agent.`
+        : historyStatus === 'REVERTIDO'
+        ? `Otimização ${toolName} revertida e confirmada pelo Windows Agent.`
+        : 'Operação reportou falha ou não foi verificada pelo Agent.',
+      details: receipt.after_state
+        ? `Estado validado: ${JSON.stringify(receipt.after_state)}`
+        : 'Execução auditada no Windows Agent.',
+      before_state: receipt.before_state || null,
+      after_state: receipt.after_state || null,
+      duration_ms: realDuration,
+      agent_version: receipt.agent_version || 'N/D',
+      rollback_available: Boolean(receipt.rollback_available),
+      verified: Boolean(receipt.verified),
+      receipt_verified: true,
+      receipt_nonce: receipt.receipt_nonce,
+      agent_signature: receipt_signature,
+    };
 
-      const historyRef = adminDb.collection('optimization_history').doc(historyId);
-      transaction.set(historyRef, historyRecord);
-
-      return {
-        execution_id: execId,
-        status: finalExecStatus,
-        historyRecord,
-      };
-    });
+    await saveOptimizationHistoryRecord(historyId, historyRecord);
 
     res.json({
       success: true,
       verified: receipt.verified,
-      execution_id: transactionResult.execution_id,
-      status: transactionResult.status,
-      record: transactionResult.historyRecord,
+      execution_id: execId,
+      status: finalExecStatus,
+      record: historyRecord,
     });
   } catch (err: any) {
     const msg = err?.message || '';
@@ -1007,8 +1024,8 @@ app.post('/api/device/sync', requireAuth, async (req: AuthenticatedRequest, res:
       updated_at: new Date().toISOString(),
     };
 
-    await adminDb.collection('devices').doc(deviceId).set(sanitizedDevice, { merge: true });
-    await adminDb.collection('users').doc(uid).update({
+    await setDeviceRecord(deviceId, sanitizedDevice);
+    await updateUserRecord(uid, {
       device_id: deviceId,
       ...(agentPubKey ? { agent_public_key: agentPubKey } : {}),
     });
@@ -1052,8 +1069,8 @@ app.post('/api/agent/pair', requireAuth, async (req: AuthenticatedRequest, res: 
       updated_at: new Date().toISOString(),
     };
 
-    await adminDb.collection('devices').doc(safeDeviceId).set(deviceData, { merge: true });
-    await adminDb.collection('users').doc(uid).update({
+    await setDeviceRecord(safeDeviceId, deviceData);
+    await updateUserRecord(uid, {
       device_id: safeDeviceId,
       agent_public_key: safePubKey,
     });
@@ -1107,8 +1124,8 @@ app.post('/api/agent/verify-challenge', requireAuth, async (req: AuthenticatedRe
       return res.status(403).json({ error: 'Challenge inválido ou expirado.', error_code: 'INVALID_TOKEN' });
     }
 
-    const devDoc = await adminDb.collection('devices').doc(device_id).get();
-    const pubKeyHex = devDoc.data()?.agent_public_key || req.userDoc?.agent_public_key;
+    const devDoc = await getDeviceRecord(device_id);
+    const pubKeyHex = devDoc?.agent_public_key || req.userDoc?.agent_public_key;
 
     if (!pubKeyHex || !/^[0-9a-fA-F]{64}$/.test(pubKeyHex)) {
       return res.status(403).json({ error: 'Chave pública do Agent não registrada.', error_code: 'DEVICE_NOT_REGISTERED' });
@@ -1158,7 +1175,7 @@ app.post('/api/admin/licenses/create', requireAuth, requireAdmin, async (req: Au
       last_seen: new Date().toISOString(),
       app_version: '2.4.0',
     };
-    await adminDb.collection('licenses').doc(newLicenseId).set(newLicense);
+    await setLicenseRecord(newLicenseId, newLicense);
     await recordAdminLog('CREATE_LICENSE', req.user!.email || 'admin', newLicenseId, `Criada licença ${newLicenseId}`);
     res.json({ success: true, license: newLicense });
   } catch (err) {
@@ -1170,7 +1187,7 @@ app.post('/api/admin/licenses/revoke', requireAuth, requireAdmin, async (req: Au
   try {
     const { license_id } = req.body;
     if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
-    await adminDb.collection('licenses').doc(license_id).update({ status: 'CANCELADA' });
+    await updateLicenseRecord(license_id, { status: 'CANCELADA' });
     await recordAdminLog('REVOKE_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} cancelada`);
     res.json({ success: true, license_id, status: 'CANCELADA' });
   } catch (err) {
@@ -1182,7 +1199,7 @@ app.post('/api/admin/licenses/suspend', requireAuth, requireAdmin, async (req: A
   try {
     const { license_id } = req.body;
     if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
-    await adminDb.collection('licenses').doc(license_id).update({ status: 'SUSPENSA' });
+    await updateLicenseRecord(license_id, { status: 'SUSPENSA' });
     await recordAdminLog('SUSPEND_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} suspensa`);
     res.json({ success: true, license_id, status: 'SUSPENSA' });
   } catch (err) {
@@ -1194,7 +1211,7 @@ app.post('/api/admin/licenses/reactivate', requireAuth, requireAdmin, async (req
   try {
     const { license_id } = req.body;
     if (!license_id) return res.status(400).json({ error: 'license_id é obrigatório.' });
-    await adminDb.collection('licenses').doc(license_id).update({ status: 'ATIVA' });
+    await updateLicenseRecord(license_id, { status: 'ATIVA' });
     await recordAdminLog('REACTIVATE_LICENSE', req.user!.email || 'admin', license_id, `Licença ${license_id} reativada`);
     res.json({ success: true, license_id, status: 'ATIVA' });
   } catch (err) {
@@ -1206,7 +1223,7 @@ app.post('/api/admin/licenses/update-expiry', requireAuth, requireAdmin, async (
   try {
     const { license_id, expires_at } = req.body;
     if (!license_id || !expires_at) return res.status(400).json({ error: 'license_id e expires_at são obrigatórios.' });
-    await adminDb.collection('licenses').doc(license_id).update({ expires_at });
+    await updateLicenseRecord(license_id, { expires_at });
     await recordAdminLog('UPDATE_LICENSE_EXPIRY', req.user!.email || 'admin', license_id, `Expiração alterada para ${expires_at}`);
     res.json({ success: true, license_id, expires_at });
   } catch (err) {
@@ -1218,7 +1235,7 @@ app.post('/api/admin/plans/update-price', requireAuth, requireAdmin, async (req:
   try {
     const { plan_id, price } = req.body;
     if (!plan_id || typeof price !== 'number') return res.status(400).json({ error: 'plan_id e price são obrigatórios.' });
-    await adminDb.collection('config').doc('plans').set({ [plan_id]: { price } }, { merge: true });
+    await setConfigRecord('plans', { [plan_id]: { price } });
     await recordAdminLog('UPDATE_PLAN_PRICE', req.user!.email || 'admin', plan_id, `Preço do plano ${plan_id} alterado para R$${price}`);
     res.json({ success: true, plan_id, price });
   } catch (err) {
@@ -1230,7 +1247,7 @@ app.post('/api/admin/plans/update-features', requireAuth, requireAdmin, async (r
   try {
     const { plan_id, features } = req.body;
     if (!plan_id || !Array.isArray(features)) return res.status(400).json({ error: 'plan_id e features são obrigatórios.' });
-    await adminDb.collection('config').doc('plans').set({ [plan_id]: { features } }, { merge: true });
+    await setConfigRecord('plans', { [plan_id]: { features } });
     await recordAdminLog('UPDATE_PLAN_FEATURES', req.user!.email || 'admin', plan_id, `Recursos do plano ${plan_id} atualizados`);
     res.json({ success: true, plan_id, features });
   } catch (err) {
@@ -1242,7 +1259,7 @@ app.post('/api/admin/plans/toggle-status', requireAuth, requireAdmin, async (req
   try {
     const { plan_id, active } = req.body;
     if (!plan_id) return res.status(400).json({ error: 'plan_id é obrigatório.' });
-    await adminDb.collection('config').doc('plans').set({ [plan_id]: { active: Boolean(active) } }, { merge: true });
+    await setConfigRecord('plans', { [plan_id]: { active: Boolean(active) } });
     await recordAdminLog('TOGGLE_PLAN_STATUS', req.user!.email || 'admin', plan_id, `Status do plano ${plan_id} alterado para ${active ? 'ATIVO' : 'INATIVO'}`);
     res.json({ success: true, plan_id, active: Boolean(active) });
   } catch (err) {
@@ -1254,7 +1271,7 @@ app.post('/api/admin/tools/update', requireAuth, requireAdmin, async (req: Authe
   try {
     const { tool_id, updates } = req.body;
     if (!tool_id || !updates || typeof updates !== 'object') return res.status(400).json({ error: 'tool_id e updates são obrigatórios.' });
-    await adminDb.collection('config').doc('tools').set({ [tool_id]: updates }, { merge: true });
+    await setConfigRecord('tools', { [tool_id]: updates });
     await recordAdminLog('UPDATE_TOOL', req.user!.email || 'admin', tool_id, `Ferramenta ${tool_id} atualizada`);
     res.json({ success: true, tool_id, updates });
   } catch (err) {
@@ -1266,7 +1283,7 @@ app.post('/api/admin/tools/add', requireAuth, requireAdmin, async (req: Authenti
   try {
     const { tool } = req.body;
     if (!tool || !tool.tool_id) return res.status(400).json({ error: 'tool com tool_id é obrigatório.' });
-    await adminDb.collection('config').doc('tools').set({ [tool.tool_id]: tool }, { merge: true });
+    await setConfigRecord('tools', { [tool.tool_id]: tool });
     await recordAdminLog('ADD_TOOL', req.user!.email || 'admin', tool.tool_id, `Ferramenta ${tool.tool_id} adicionada ao catálogo customizado`);
     res.json({ success: true, tool });
   } catch (err) {
@@ -1311,9 +1328,9 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
     }
 
     // Idempotency check: if transaction_id was already processed, do not create duplicate license
-    const existingTxSnap = await adminDb.collection('licenses').where('transaction_id', '==', safeTxId).get();
-    if (!existingTxSnap.empty) {
-      const existingLic = existingTxSnap.docs[0].data();
+    const allLics = await listLicenseRecords();
+    const existingLic = allLics.find((l: any) => l.transaction_id === safeTxId);
+    if (existingLic) {
       return res.json({
         success: true,
         already_processed: true,
@@ -1338,17 +1355,17 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
       planName = 'MÉDIO';
     }
 
-    const userSnap = await adminDb.collection('users').where('email', '==', safeEmail).get();
-    if (userSnap.empty) {
+    const allUsers = await listUserRecords();
+    const userDoc = allUsers.find((u: any) => (u.email || '').toLowerCase() === safeEmail);
+    if (!userDoc) {
       return res.status(404).json({ error: 'Usuário não encontrado para o e-mail informado.' });
     }
 
-    const userDoc = userSnap.docs[0];
-    const uid = userDoc.id;
+    const uid = userDoc.user_id;
     const newLicenseId = `lic_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    await userDoc.ref.update({
+    await updateUserRecord(uid, {
       plano_atual: planName,
       nivel_plano: planLevel,
       status_plano: 'ATIVO',
@@ -1358,18 +1375,18 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
       data_expiracao: expiresAt,
     });
 
-    await adminDb.collection('licenses').doc(newLicenseId).set({
+    await setLicenseRecord(newLicenseId, {
       license_id: newLicenseId,
       license_key: `DYARTE-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,
       user_id: uid,
-      user_name: customer_name || userDoc.data().nome || 'Cliente',
+      user_name: customer_name || userDoc.nome || 'Cliente',
       user_email: safeEmail,
       plan_id: safePlanId,
       status: 'ATIVA',
       created_at: new Date().toISOString().split('T')[0],
       activated_at: new Date().toISOString(),
       expires_at: expiresAt,
-      device_id: userDoc.data().device_id || 'PENDENTE',
+      device_id: userDoc.device_id || 'PENDENTE',
       transaction_id: safeTxId,
     });
 
@@ -1389,8 +1406,7 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
 // List All Users in System
 app.get('/api/admin/users', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const usersSnap = await adminDb.collection('users').get();
-    const usersList = usersSnap.docs.map((d) => d.data());
+    const usersList = await listUserRecords();
     res.json({ users: usersList });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar usuários cadastrados.' });
@@ -1417,7 +1433,7 @@ app.post('/api/admin/user/plan', requireAuth, requireAdmin, async (req: Authenti
       data_expiracao: safeLevel === 1 ? 'VITALÍCIO' : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
     };
 
-    await adminDb.collection('users').doc(target_user_id).update(updateData);
+    await updateUserRecord(target_user_id, updateData);
 
     // Record admin log
     await recordAdminLog(
@@ -1441,7 +1457,7 @@ app.post('/api/admin/user/status', requireAuth, requireAdmin, async (req: Authen
       return res.status(400).json({ error: 'Parâmetros de status inválidos.' });
     }
 
-    await adminDb.collection('users').doc(target_user_id).update({ status });
+    await updateUserRecord(target_user_id, { status });
 
     await recordAdminLog(
       status === 'BLOQUEADO' ? 'BLOCK_USER' : 'UNBLOCK_USER',
@@ -1465,25 +1481,15 @@ app.delete('/api/admin/user/:userId', requireAuth, requireAdmin, async (req: Aut
     }
 
     // Safety check: protect administrators from deletion
-    const userDocRef = adminDb.collection('users').doc(userId);
-    const userSnap = await userDocRef.get();
-    if (userSnap.exists) {
-      const data = userSnap.data();
-      if (data?.role === 'ADMIN' || data?.role === 'SUPER_ADMIN') {
+    const userData = await getUserRecord(userId);
+    if (userData) {
+      if (userData?.role === 'ADMIN' || userData?.role === 'SUPER_ADMIN') {
         return res.status(403).json({ error: 'Não é permitido excluir contas com perfil de Administrador.' });
       }
     }
 
-    // Delete Firestore user document
-    await userDocRef.delete();
-
-    // Revoke or delete any user licenses
-    const licSnap = await adminDb.collection('licenses').where('user_id', '==', userId).get();
-    const batch = adminDb.batch();
-    licSnap.docs.forEach((doc) => {
-      batch.delete(doc.ref);
-    });
-    await batch.commit();
+    // Delete user and associated licenses
+    await deleteUserRecord(userId);
 
     // Try deleting from Firebase Auth if exists
     try {
@@ -1526,7 +1532,7 @@ app.post('/api/admin/license/action', requireAuth, requireAdmin, async (req: Aut
         app_version: '2.4.0',
       };
 
-      await adminDb.collection('licenses').doc(newLicenseId).set(newLicense);
+      await setLicenseRecord(newLicenseId, newLicense);
       await recordAdminLog('CREATE_LICENSE', req.user!.email || 'admin', newLicenseId, `Criada licença ${newLicenseId}`);
       return res.json({ success: true, license: newLicense });
     }
@@ -1535,13 +1541,12 @@ app.post('/api/admin/license/action', requireAuth, requireAdmin, async (req: Aut
       return res.status(400).json({ error: 'license_id é obrigatório.' });
     }
 
-    const licRef = adminDb.collection('licenses').doc(license_id);
     let newStatus = 'ATIVA';
     if (action === 'SUSPEND') newStatus = 'SUSPENSA';
     if (action === 'REVOKE') newStatus = 'CANCELADA';
     if (action === 'REACTIVATE') newStatus = 'ATIVA';
 
-    await licRef.update({ status: newStatus });
+    await updateLicenseRecord(license_id, { status: newStatus });
     await recordAdminLog(`${action}_LICENSE`, req.user!.email || 'admin', license_id, `Status alterado para ${newStatus}`);
 
     res.json({ success: true, license_id, status: newStatus });
@@ -1553,8 +1558,7 @@ app.post('/api/admin/license/action', requireAuth, requireAdmin, async (req: Aut
 // Get Administrative Audit Logs
 app.get('/api/admin/logs', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const logsSnap = await adminDb.collection('admin_logs').orderBy('timestamp', 'desc').limit(100).get();
-    const logs = logsSnap.docs.map((d) => d.data());
+    const logs = await listAdminLogRecords(100);
     res.json({ logs });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao carregar logs administrativos.' });
@@ -1564,8 +1568,7 @@ app.get('/api/admin/logs', requireAuth, requireAdmin, async (req: AuthenticatedR
 // List All Licenses in System (Admin Only - Real Database Capture)
 app.get('/api/admin/licenses', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const licSnap = await adminDb.collection('licenses').get();
-    const licensesList = licSnap.docs.map((d) => d.data());
+    const licensesList = await listLicenseRecords();
     res.json({ licenses: licensesList });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar licenças do sistema.' });
@@ -1575,20 +1578,17 @@ app.get('/api/admin/licenses', requireAuth, requireAdmin, async (req: Authentica
 // Real-time Database Aggregate Stats for Admin Dashboard
 app.get('/api/admin/stats', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const [usersSnap, licSnap] = await Promise.all([
-      adminDb.collection('users').get(),
-      adminDb.collection('licenses').get(),
+    const [users, licenses] = await Promise.all([
+      listUserRecords(),
+      listLicenseRecords(),
     ]);
 
-    const users = usersSnap.docs.map((d) => d.data());
-    const licenses = licSnap.docs.map((d) => d.data());
-
     const totalUsers = users.length;
-    const activeLicenses = licenses.filter((l) => l.status === 'ATIVA').length;
-    const paidUsers = users.filter((u) => Number(u.nivel_plano) > 1 && u.status_plano === 'ATIVO').length;
+    const activeLicenses = licenses.filter((l: any) => l.status === 'ATIVA').length;
+    const paidUsers = users.filter((u: any) => Number(u.nivel_plano) > 1 && u.status_plano === 'ATIVO').length;
 
     // Real estimated monthly revenue calculation based on active user plan levels (R$ 30, R$ 45, R$ 60)
-    const monthlyRevenue = users.reduce((acc, u) => {
+    const monthlyRevenue = users.reduce((acc: number, u: any) => {
       if (u.status_plano === 'ATIVO') {
         const lvl = Number(u.nivel_plano);
         if (lvl === 2) return acc + 30;

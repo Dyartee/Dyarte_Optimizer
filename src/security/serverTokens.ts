@@ -1,7 +1,9 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import { SERVER_ED25519_PUB_HEX } from '../config/keys';
 
 export type OptimizationOperation = 'APPLY' | 'ROLLBACK';
+export { SERVER_ED25519_PUB_HEX };
 
 export interface OptimizationTokenPayload {
   protocol_version: number;
@@ -38,17 +40,21 @@ export interface ExecutionReceiptPayload {
 const PKCS8_HEADER = Buffer.from('302e020100300506032b657004220420', 'hex');
 const SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
 
-// Official public key for DYARTE OPTIMIZER execution authority (rotated, non-compromised)
-export const SERVER_ED25519_PUB_HEX = 'd2d6fbcf8cd1798dc51f89f6ef8cf21d67b86134affa7b6539ebbc80e844568c';
-
 let cachedPrivateKey: crypto.KeyObject | null = null;
 let cachedPublicKey: crypto.KeyObject | null = null;
 
 // Replay protection storage for nonces with expiration
 interface NonceEntry {
   exp: number;
+  userId?: string;
 }
-const MAX_NONCE_STORE_CAPACITY = 10000;
+
+// PROBLEMA 5: Aumentada capacidade para 200.000 entradas para comportar a janela de 60s
+// com proteção ativa contra DoS e limite por usuário.
+const MAX_NONCE_STORE_CAPACITY = 200000;
+const MAX_NONCES_PER_USER = 1000; // Limite defensivo por usuário ativo na janela de 60s
+const userNonceCounts = new Map<string, number>();
+
 const consumedTokenNonces = new Map<string, NonceEntry>();
 const consumedReceiptNonces = new Map<string, NonceEntry>();
 
@@ -59,6 +65,14 @@ const consumedReceiptNonces = new Map<string, NonceEntry>();
 export function purgeExpiredNonces(map: Map<string, NonceEntry>, nowSec: number): void {
   for (const [nonce, entry] of map.entries()) {
     if (entry.exp < nowSec) {
+      if (entry.userId && userNonceCounts.has(entry.userId)) {
+        const count = userNonceCounts.get(entry.userId)! - 1;
+        if (count <= 0) {
+          userNonceCounts.delete(entry.userId);
+        } else {
+          userNonceCounts.set(entry.userId, count);
+        }
+      }
       map.delete(nonce);
     }
   }
@@ -68,12 +82,18 @@ export function purgeExpiredNonces(map: Map<string, NonceEntry>, nowSec: number)
  * Validates and records a nonce for replay protection.
  * Returns error code if rejected, or null if accepted.
  */
-export function recordNonceConsumption(map: Map<string, NonceEntry>, nonce: string, exp: number, nowSec: number): string | null {
+export function recordNonceConsumption(
+  map: Map<string, NonceEntry>,
+  nonce: string,
+  exp: number,
+  nowSec: number,
+  userId?: string
+): string | null {
   if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
     return 'NONCE_EMPTY';
   }
 
-  // Purge expired entries first
+  // Purge expired entries aggressively
   purgeExpiredNonces(map, nowSec);
 
   // Check if nonce was already consumed
@@ -81,53 +101,65 @@ export function recordNonceConsumption(map: Map<string, NonceEntry>, nonce: stri
     return 'TOKEN_REPLAY';
   }
 
-  // Check capacity limit
+  // Per-user quota check to prevent single authenticated user DoS (Problema 5)
+  if (userId) {
+    const currentCount = userNonceCounts.get(userId) || 0;
+    if (currentCount >= MAX_NONCES_PER_USER) {
+      return 'USER_NONCE_QUOTA_EXCEEDED';
+    }
+  }
+
+  // Check global capacity limit
   if (map.size >= MAX_NONCE_STORE_CAPACITY) {
     return 'NONCE_STORE_FULL';
   }
 
-  map.set(nonce, { exp });
+  map.set(nonce, { exp, userId });
+  if (userId) {
+    userNonceCounts.set(userId, (userNonceCounts.get(userId) || 0) + 1);
+  }
   return null;
 }
 
 /**
  * Validates and retrieves the server's Ed25519 signing private key.
- * STRICT SECURITY REQUIREMENTS (Requirement 18):
- * - Loaded strictly from environment variable OPTIMIZATION_SIGNING_PRIVATE_KEY
+ * STRICT SECURITY REQUIREMENTS (Problema 1 & Requirement 18):
+ * - Loaded strictly and EXCLUSIVELY from environment variable OPTIMIZATION_SIGNING_PRIVATE_KEY
  * - Must be strictly 64 hex characters (32 raw bytes)
- * - Ausente -> erro
- * - Inválida (senha, passphrase, string arbitrária) -> erro
+ * - Ausente -> erro imediato (Fail-Closed)
+ * - Inválida (senha, passphrase, string arbitrária) -> erro imediato
  * - Válida -> usar
  * - NUNCA criar chave automaticamente
  * - NUNCA derivar chave automaticamente via SHA-256
  * - NUNCA registrar chave privada em logs
- * - NUNCA utilizar fallback inseguro de .env em produção
+ * - NUNCA utilizar chave DEV hardcoded ou fallback inseguro em NENHUM ambiente
+ * - NUNCA aceitar bypass ou strings especiais como DyarteCaktoWebhook
  */
+export function _resetCachedKeys(): void {
+  cachedPrivateKey = null;
+  cachedPublicKey = null;
+}
+
 export function getServerSigningPrivateKey(): crypto.KeyObject {
   if (cachedPrivateKey) {
     return cachedPrivateKey;
   }
 
-  let rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
-  const DEV_PAIR_KEY_HEX = 'f60d37aea1d7bf39fe67439a0de4fde87fcd9c1a6a02f4bfe3a5b598c452ac8c';
+  const rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
 
-  if (!rawKeyHex || rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
-    // Check if in development or if an accidental passphrase/webhook secret was passed
-    if (process.env.NODE_ENV !== 'production' || rawKeyHex.includes('DyarteCaktoWebhook')) {
-      console.warn('[Security Notice] OPTIMIZATION_SIGNING_PRIVATE_KEY ausente ou inválida. Aplicando chave pareada do ambiente de desenvolvimento.');
-      rawKeyHex = DEV_PAIR_KEY_HEX;
-    } else if (!rawKeyHex) {
-      throw new Error(
-        '[CONFIG_KEY_MISSING] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
-        'Formato esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
-      );
-    } else {
-      throw new Error(
-        '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY é inválida. ' +
-        'Não são aceitas senhas, passphrases ou strings arbitrárias. ' +
-        'Formato estrito esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
-      );
-    }
+  if (!rawKeyHex) {
+    throw new Error(
+      '[CONFIG_KEY_MISSING] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
+      'Fail-closed: startup abortado. Formato esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
+    );
+  }
+
+  if (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
+    throw new Error(
+      '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY é inválida. ' +
+      'Não são aceitas senhas, passphrases, webhooks ou strings arbitrárias. ' +
+      'Formato estrito obrigatório: exatamente 64 caracteres hexadecimais (32 bytes).'
+    );
   }
 
   try {
@@ -381,13 +413,15 @@ export function verifyOptimizationExecutionToken(
     return { valid: false, error_code: 'NONCE_EMPTY', error: 'Nonce ausente ou vazio no token.' };
   }
 
-  const nonceErr = recordNonceConsumption(consumedTokenNonces, payload.nonce, payload.exp, nowSec);
+  const nonceErr = recordNonceConsumption(consumedTokenNonces, payload.nonce, payload.exp, nowSec, payload.user_id);
   if (nonceErr) {
     return {
       valid: false,
       error_code: nonceErr,
       error: nonceErr === 'TOKEN_REPLAY'
         ? 'Token de execução já utilizado anteriormente (replay detectado).'
+        : nonceErr === 'USER_NONCE_QUOTA_EXCEEDED'
+        ? 'Limite de requisições concorrentes/tokens atingido para este usuário. Aguarde a expiração dos tokens ativos.'
         : nonceErr === 'NONCE_STORE_FULL'
         ? 'Capacidade do registro de nonces atingida por tokens válidos (rejeitado por segurança).'
         : 'Nonce inválido no token.',

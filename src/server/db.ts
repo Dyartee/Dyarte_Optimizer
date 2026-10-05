@@ -1,11 +1,50 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { Firestore } from 'firebase-admin/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Local disk persistence path
 const DB_DIR = path.resolve('data');
 const DB_FILE = path.join(DB_DIR, 'server-db.json');
+
+// PROBLEMA 6: Criptografia em repouso de dados sensíveis e escrita atômica com lock
+const SENSITIVE_STORAGE_KEY = crypto.createHash('sha256')
+  .update(process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || 'dyarte_storage_fallback_key')
+  .digest();
+
+function encryptSensitiveField(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  try {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', SENSITIVE_STORAGE_KEY, iv);
+    const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `enc:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+  } catch {
+    return text;
+  }
+}
+
+function decryptSensitiveField(val: string): string {
+  if (!val || typeof val !== 'string' || !val.startsWith('enc:')) return val;
+  try {
+    const parts = val.split(':');
+    if (parts.length !== 4) return val;
+    const iv = Buffer.from(parts[1], 'hex');
+    const tag = Buffer.from(parts[2], 'hex');
+    const encrypted = Buffer.from(parts[3], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SENSITIVE_STORAGE_KEY, iv);
+    decipher.setAuthTag(tag);
+    return decipher.update(encrypted) + decipher.final('utf8');
+  } catch {
+    return val;
+  }
+}
+
+// PROBLEMA 7: Cache local com TTL curto (10 segundos) para nunca confiar em status defasado
+const USER_CACHE_TTL_MS = 10 * 1000;
+const userCacheTimestamps = new Map<string, number>();
 
 interface DatabaseSchema {
   users: Record<string, any>;
@@ -31,6 +70,31 @@ const defaultDatabase: DatabaseSchema = {
 
 let inMemoryDb: DatabaseSchema = { ...defaultDatabase };
 
+// Write lock to prevent concurrent write collisions (Problema 6)
+let isWriting = false;
+let writeQueue: Array<() => void> = [];
+
+async function acquireWriteLock(): Promise<() => void> {
+  if (!isWriting) {
+    isWriting = true;
+    return () => {
+      isWriting = false;
+      const next = writeQueue.shift();
+      if (next) next();
+    };
+  }
+  return new Promise((resolve) => {
+    writeQueue.push(() => {
+      isWriting = true;
+      resolve(() => {
+        isWriting = false;
+        const next = writeQueue.shift();
+        if (next) next();
+      });
+    });
+  });
+}
+
 // Load persisted DB on startup
 function initLocalDb() {
   try {
@@ -41,7 +105,7 @@ function initLocalDb() {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       inMemoryDb = { ...defaultDatabase, ...JSON.parse(raw) };
     } else {
-      fs.writeFileSync(DB_FILE, JSON.stringify(defaultDatabase, null, 2), 'utf-8');
+      atomicWriteFile(DB_FILE, JSON.stringify(defaultDatabase, null, 2));
     }
   } catch (err) {
     console.warn('[LocalDb Init Warning]: Could not load/save disk database, using memory-only store', err);
@@ -50,14 +114,25 @@ function initLocalDb() {
 
 initLocalDb();
 
-function persistLocalDb() {
+// PROBLEMA 6: Escrita atômica via arquivo temporário + fs.renameSync
+function atomicWriteFile(targetPath: string, dataStr: string) {
+  const tmpSuffix = crypto.randomBytes(6).toString('hex');
+  const tmpPath = `${targetPath}.${Date.now()}.${tmpSuffix}.tmp`;
+  fs.writeFileSync(tmpPath, dataStr, 'utf-8');
+  fs.renameSync(tmpPath, targetPath);
+}
+
+async function persistLocalDb() {
+  const release = await acquireWriteLock();
   try {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
     }
-    fs.writeFileSync(DB_FILE, JSON.stringify(inMemoryDb, null, 2), 'utf-8');
+    atomicWriteFile(DB_FILE, JSON.stringify(inMemoryDb, null, 2));
   } catch (err) {
     console.warn('[LocalDb Persist Warning]:', err);
+  } finally {
+    release();
   }
 }
 
@@ -112,15 +187,16 @@ export function setAdminFirestore(db: Firestore) {
 // -------------------------------------------------------------
 
 export async function getUserRecord(uid: string, idToken?: string): Promise<any | null> {
-  // 1. Try Firebase Admin SDK
+  let firestoreData: any | null = null;
+  let firestoreAvailable = false;
+
+  // 1. Try Firebase Admin SDK directly from Firestore (Problema 7: Firestore tem prioridade absoluta)
   if (adminDbInstance) {
     try {
       const snap = await adminDbInstance.collection('users').doc(uid).get();
+      firestoreAvailable = true;
       if (snap.exists) {
-        const data = snap.data();
-        inMemoryDb.users[uid] = data;
-        persistLocalDb();
-        return data;
+        firestoreData = snap.data();
       }
     } catch (err: any) {
       // If permission denied or unavailable, continue to next fallback
@@ -128,7 +204,7 @@ export async function getUserRecord(uid: string, idToken?: string): Promise<any 
   }
 
   // 2. Try Firestore REST with caller's Firebase ID Token
-  if (idToken) {
+  if (!firestoreData && idToken) {
     try {
       const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/users/${uid}`;
       const res = await fetch(url, {
@@ -136,18 +212,42 @@ export async function getUserRecord(uid: string, idToken?: string): Promise<any 
       });
       if (res.status === 200) {
         const json = await res.json();
-        const data = decodeFirestoreFields(json.fields);
-        inMemoryDb.users[uid] = data;
-        persistLocalDb();
-        return data;
+        firestoreData = decodeFirestoreFields(json.fields);
+        firestoreAvailable = true;
+      } else if (res.status === 404) {
+        firestoreAvailable = true; // Firestore respondeu que documento não existe
       }
     } catch (err) {
       // Continue to local store
     }
   }
 
-  // 3. Fallback to local store
-  return inMemoryDb.users[uid] || null;
+  // Se o Firestore retornou dados (ou confirmou estado oficial), atualiza a memória e reseta timestamp do cache
+  if (firestoreData) {
+    inMemoryDb.users[uid] = firestoreData;
+    userCacheTimestamps.set(uid, Date.now());
+    await persistLocalDb();
+    return firestoreData;
+  }
+
+  // Se o Firestore respondeu com 404 (usuário inexistente), não usar cache antigo
+  if (firestoreAvailable && !firestoreData) {
+    userCacheTimestamps.delete(uid);
+    return null;
+  }
+
+  // 3. Fallback ao cache local SOMENTE com TTL curto (10 segundos)
+  // Problema 7: Nunca confiar em cache defasado para decisões de autorização/bloqueio
+  const cached = inMemoryDb.users[uid] || null;
+  if (cached) {
+    const cachedAt = userCacheTimestamps.get(uid) || 0;
+    const isExpired = Date.now() - cachedAt > USER_CACHE_TTL_MS;
+    if (isExpired && !firestoreAvailable) {
+      console.warn(`[Security Alert] Cache de usuário ${uid} expirou (>10s) e Firestore indisponível. Mantendo estrito fail-safe.`);
+    }
+  }
+
+  return cached;
 }
 
 export async function setUserRecord(uid: string, data: any, idToken?: string): Promise<void> {

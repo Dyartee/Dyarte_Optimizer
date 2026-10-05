@@ -11,7 +11,8 @@ const crypto = require('crypto');
 const driverService = require('./driverService.cjs');
 
 const SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
-const SERVER_ED25519_PUB_HEX = '9fc58ae7dd4361cad6a68dabefa3e061fbe684a76c0e91d53ad85a120e2d6666';
+// Centralized server public key (aligned strictly with src/config/keys.ts and serverTokens.ts)
+const SERVER_ED25519_PUB_HEX = 'd2d6fbcf8cd1798dc51f89f6ef8cf21d67b86134affa7b6539ebbc80e844568c';
 
 /**
  * Requirement 9: Driver / DDU Central Authorization Validator
@@ -322,31 +323,46 @@ function createMainWindow() {
   });
 
   // Gerenciamento de janelas filhas e popups (Google Login & Links Externos)
+  // PROBLEMA 10: Allowlist restrita aos domínios mínimos necessários para o fluxo OAuth
+  // (accounts.google.com e <authDomain>/__/auth/handler do Firebase).
+  // contextIsolation mantido como true com sandbox para proteção contra ataques a partir de conteúdo web.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     console.log('[Electron] Solicitação de abertura de URL:', url);
 
-    // Permite popups de autenticação do Google e Firebase Auth
-    if (
-      url.includes('accounts.google.com') ||
-      url.includes('firebaseapp.com') ||
-      url.includes('/__/auth/handler') ||
-      url.includes('google.com/o/oauth2') ||
-      url.includes('googleapis.com')
-    ) {
-      console.log('[Electron] [Auth] Permitindo popup de autenticação Google / Firebase Auth.');
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      console.warn('[Electron] [Security] URL de popup malformada rejeitada:', url);
+      return { action: 'deny' };
+    }
+
+    const isGoogleAuthOrigin =
+      parsedUrl.protocol === 'https:' &&
+      (parsedUrl.hostname === 'accounts.google.com' ||
+       parsedUrl.hostname.endsWith('.firebaseapp.com'));
+
+    const isAuthHandlerPath =
+      parsedUrl.pathname.startsWith('/o/oauth2') ||
+      parsedUrl.pathname.startsWith('/signin') ||
+      parsedUrl.pathname.startsWith('/v2/auth') ||
+      parsedUrl.pathname.includes('/__/auth/handler');
+
+    if (isGoogleAuthOrigin && isAuthHandlerPath) {
+      console.log('[Electron] [Auth] Permitindo popup estrito de autenticação Google / Firebase Auth:', parsedUrl.hostname);
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
           width: 520,
           height: 650,
-          frame: true, // Popup do Google tem moldura nativa para clareza
+          frame: true,
           autoHideMenuBar: true,
           center: true,
           title: 'Google Login - DYARTE OPTIMIZER',
           webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false, // Necessário para comunicação via postMessage/window.opener com o Firebase Auth
-            sandbox: false,
+            contextIsolation: true, // Mantido true para isolamento estrito de contexto contra XSS/injeção
+            sandbox: true,          // Sandbox nativo do Chromium ativado no popup de autenticação
           },
         },
       };

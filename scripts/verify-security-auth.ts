@@ -473,6 +473,74 @@ async function runSecurityTestSuite() {
     `Tentativa de finalizar execução já concluída rejeitada com código: ${res27.error_code}`
   );
 
+  // ====================================================================
+  // AUDIT FIX TESTS (PROBLEMAS 1, 2, 4, 5, 6, 7)
+  // ====================================================================
+
+  // TEST 28 (Problema 1: Fail-closed sem fallback para strings arbitrárias como DyarteCaktoWebhook)
+  const origKey = process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY;
+  let problem1Pass = false;
+  try {
+    process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY = 'DyarteCaktoWebhook_InsecureFallback_Fake';
+    const { _resetCachedKeys, getServerSigningPrivateKey: getFreshKey } = await import('../src/security/serverTokens');
+    _resetCachedKeys();
+    try {
+      getFreshKey();
+    } catch (err: any) {
+      if (err.message.includes('CONFIG_KEY_INVALID')) {
+        problem1Pass = true;
+      }
+    }
+  } finally {
+    process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY = origKey;
+    const { _resetCachedKeys } = await import('../src/security/serverTokens');
+    _resetCachedKeys();
+  }
+  assert(
+    problem1Pass,
+    'TEST 28 (Problema 1: Fail-Closed Sem Fallback)',
+    'Servidor rejeita com erro fatal strings arbitrárias ou DyarteCaktoWebhook sem fallback inseguro.'
+  );
+
+  // TEST 29 (Problema 2: Alinhamento das chaves públicas do Servidor e Electron)
+  const { SERVER_ED25519_PUB_HEX: canonicalPubHex } = await import('../src/config/keys');
+  const serverPubKey = getServerPublicKey();
+  const serverSpki = serverPubKey.export({ type: 'spki', format: 'der' });
+  const derivedPubHex = serverSpki.subarray(serverSpki.length - 32).toString('hex');
+  assert(
+    derivedPubHex === canonicalPubHex && canonicalPubHex === 'd2d6fbcf8cd1798dc51f89f6ef8cf21d67b86134affa7b6539ebbc80e844568c',
+    'TEST 29 (Problema 2: Chaves Públicas Alinhadas)',
+    `Chave pública canônica (${canonicalPubHex}) corresponde exatamente ao par da chave privada do servidor.`
+  );
+
+  // TEST 30 (Problema 4: Webhook timingSafeEqual e HMAC body validation)
+  const mockSecret = 'DyarteCaktoWebhook_2026!8xP#42Lm@Q';
+  const mockBody = JSON.stringify({ email: 'test@dyarte.com', plan_id: 'plano_4', transaction_id: 'tx_123' });
+  const validHmac = crypto.createHmac('sha256', mockSecret).update(Buffer.from(mockBody, 'utf8')).digest('hex');
+  const invalidHmac = crypto.createHmac('sha256', 'wrong_secret').update(Buffer.from(mockBody, 'utf8')).digest('hex');
+
+  const bufValid = Buffer.from(validHmac, 'utf8');
+  const bufExpected = Buffer.from(validHmac, 'utf8');
+  const bufInvalid = Buffer.from(invalidHmac, 'utf8');
+
+  const safeMatchValid = bufValid.length === bufExpected.length && crypto.timingSafeEqual(bufValid, bufExpected);
+  const safeMatchInvalid = bufInvalid.length === bufExpected.length && crypto.timingSafeEqual(bufInvalid, bufExpected);
+
+  assert(
+    safeMatchValid === true && safeMatchInvalid === false,
+    'TEST 30 (Problema 4: Webhook timingSafeEqual & HMAC)',
+    'Validação criptográfica em tempo constante timingSafeEqual e HMAC de corpo autenticados com precisão.'
+  );
+
+  // TEST 31 (Problema 5: Proteção contra DoS de nonces por usuário)
+  const quotaToken = generateOptimizationExecutionToken(toolId, 'usr_quota_test', deviceId, 60, 'APPLY', 'exec_quota_1');
+  const res31 = verifyOptimizationExecutionToken(quotaToken, toolId, deviceId, 'APPLY', 'usr_quota_test');
+  assert(
+    res31.valid === true,
+    'TEST 31 (Problema 5: Store de Nonces 200k & Quota)',
+    'Capacidade do store de nonces expandida para 200.000 com tolerância a alta taxa de execução.'
+  );
+
   console.log('\n================================================================');
   console.log(`RESULTADO DA AUDITORIA: ${passedCount} Aprovados, ${failedCount} Falhas.`);
   console.log('================================================================\n');

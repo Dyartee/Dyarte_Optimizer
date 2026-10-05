@@ -57,8 +57,33 @@ if (!validateServerSigningConfiguration()) {
 const app = express();
 const PORT = 3000;
 
-// Section 9: Limit express JSON payload size to prevent DoS attacks
-app.use(express.json({ limit: '64kb' }));
+// PROBLEMA 8: Confiança em proxy reverso (ex: Cloud Run / Nginx) quando disponível
+// Permite extração correta de IP pelo req.ip e X-Forwarded-For sem spoofing arbitrário
+app.set('trust proxy', 1);
+
+// PROBLEMA 9: Headers de segurança e Content-Security-Policy (CSP)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://apis.google.com; connect-src 'self' ws://127.0.0.1:49152 http://127.0.0.1:3000 https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https:; frame-src 'self' https://accounts.google.com https://*.firebaseapp.com;"
+  );
+  next();
+});
+
+// Section 9: Limit express JSON payload size to prevent DoS attacks with rawBody capture for webhook HMAC
+app.use(
+  express.json({
+    limit: '64kb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 // Initialize Firebase Admin SDK
 let adminApp: AdminApp;
@@ -1291,7 +1316,8 @@ app.post('/api/admin/tools/add', requireAuth, requireAdmin, async (req: Authenti
   }
 });
 
-// Cakto Payment Webhook (Strictly server-side secret validation)
+// Cakto Payment Webhook (Strictly server-side secret & HMAC validation)
+// PROBLEMA 4: Uso de crypto.timingSafeEqual para comparação em tempo constante e validação HMAC do payload
 app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
   try {
     const serverSecret = process.env.CAKTO_WEBHOOK_SECRET;
@@ -1304,11 +1330,40 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
       });
     }
 
-    const authHeader = req.headers['authorization'] || req.headers['x-webhook-secret'];
+    const authHeader = (req.headers['authorization'] || req.headers['x-webhook-secret'] || '') as string;
+    const hmacHeader = (req.headers['x-cakto-signature'] || req.headers['x-hub-signature-256'] || '') as string;
 
-    if (!authHeader || (authHeader !== serverSecret && authHeader !== `Bearer ${serverSecret}`)) {
-      console.warn('[Security] [Webhook] Tentativa de acesso com segredo inválido ou ausente:', {
+    // 1. Constant-time comparison for secret token / bearer header (Problema 4)
+    const normalizedAuth = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+    const serverSecretBuf = Buffer.from(serverSecret, 'utf8');
+    const incomingSecretBuf = Buffer.from(normalizedAuth, 'utf8');
+
+    let secretMatches = false;
+    if (incomingSecretBuf.length === serverSecretBuf.length) {
+      secretMatches = crypto.timingSafeEqual(incomingSecretBuf, serverSecretBuf);
+    }
+
+    // 2. Validate cryptographic HMAC of body payload if HMAC signature header is provided
+    let hmacMatches = true;
+    if (hmacHeader) {
+      const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+      const expectedHmac = crypto.createHmac('sha256', serverSecret).update(rawBody).digest('hex');
+      const expectedHmacBuf = Buffer.from(expectedHmac, 'utf8');
+      const cleanHmacHeader = hmacHeader.replace(/^sha256=/, '');
+      const incomingHmacBuf = Buffer.from(cleanHmacHeader, 'utf8');
+
+      if (incomingHmacBuf.length === expectedHmacBuf.length) {
+        hmacMatches = crypto.timingSafeEqual(incomingHmacBuf, expectedHmacBuf);
+      } else {
+        hmacMatches = false;
+      }
+    }
+
+    if (!secretMatches || !hmacMatches) {
+      console.warn('[Security] [Webhook] Tentativa de acesso com segredo ou HMAC inválido:', {
         ip: req.ip,
+        secretOk: secretMatches,
+        hmacOk: hmacMatches,
         timestamp: new Date().toISOString(),
       });
       return res.status(401).json({ error: 'Assinatura ou segredo do webhook inválido.' });
@@ -1664,11 +1719,12 @@ async function startServer() {
     });
   }
 
-  // In Cloud Run containers, binding to 0.0.0.0 is strictly required for ingress and TCP health probes
-  const HOST = '0.0.0.0';
+  // PROBLEMA 3: Servidor local escutando estritamente em loopback (127.0.0.1) para impedir exposição na rede local
+  // Em ambientes de nuvem (Cloud Run/Docker), BIND_HOST ou HOST pode ser configurado explicitamente via env
+  const HOST = process.env.BIND_HOST || process.env.HOST || (process.env.NODE_ENV === 'production' && process.env.K_SERVICE ? '0.0.0.0' : '127.0.0.1');
 
   app.listen(PORT, HOST, () => {
-    console.log(`DYARTE OPTIMIZER Server listening on http://${HOST}:${PORT}`);
+    console.log(`DYARTE OPTIMIZER Server listening strictly on http://${HOST}:${PORT}`);
   });
 }
 

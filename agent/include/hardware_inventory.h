@@ -23,6 +23,18 @@
 namespace Dyarte {
 namespace Agent {
 
+static bool IsValidGuid(const std::string& guid) {
+    if (guid.length() != 36) return false;
+    for (size_t i = 0; i < 36; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (guid[i] != '-') return false;
+        } else {
+            if (!std::isxdigit(static_cast<unsigned char>(guid[i]))) return false;
+        }
+    }
+    return true;
+}
+
 /**
  * HardwareInventory
  * Real Windows hardware discovery module without any simulated or fictitious values.
@@ -805,7 +817,8 @@ public:
         std::string tpmVersionStr = "null";
         std::string tpmCmd = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { $t = Get-Tpm -ErrorAction Stop; [PSCustomObject]@{ p=$t.TpmPresent; r=$t.TpmReady; v=$t.ManufacturerVersion } | ConvertTo-Json -Compress } catch { }\"");
         if (!tpmCmd.empty() && tpmCmd.find("\"p\":") != std::string::npos) {
-            JsonHelper tpmJson(tpmCmd);
+            JsonValue tpmJson;
+            JsonParser::Parse(tpmCmd, tpmJson);
             if (tpmCmd.find("\"p\":true") != std::string::npos) tpmPresentStr = "true";
             else if (tpmCmd.find("\"p\":false") != std::string::npos) tpmPresentStr = "false";
 

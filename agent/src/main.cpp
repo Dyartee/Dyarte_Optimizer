@@ -33,18 +33,6 @@ struct PowerSchemeInfo {
     bool valid = false;
 };
 
-static bool IsValidGuid(const std::string& guid) {
-    if (guid.length() != 36) return false;
-    for (size_t i = 0; i < 36; ++i) {
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            if (guid[i] != '-') return false;
-        } else {
-            if (!std::isxdigit(static_cast<unsigned char>(guid[i]))) return false;
-        }
-    }
-    return true;
-}
-
 static std::string GetAgentDataDirectory() {
 #ifdef _WIN32
     char localAppData[MAX_PATH];
@@ -668,7 +656,7 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 // Se o plano atual já for High Performance
                 if (before.guid == highPerfBase || before.name.find("Alto desempenho") != std::string::npos || before.name.find("High performance") != std::string::npos) {
                     // Requirement 24: Persist snapshot even for JA_APLICADO so rollback is deterministic
-                    SavePersistentSnapshot(deviceId, toolId, beforeJson, before.guid);
+                    SavePersistentSnapshot(requestId, tokenRes.executionId, deviceId, toolId, beforeJson, beforeJson);
 
                     auto endTime = std::chrono::steady_clock::now();
                     int64_t dur = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();

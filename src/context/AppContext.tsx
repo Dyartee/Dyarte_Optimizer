@@ -221,6 +221,34 @@ interface AppContextType {
   isDduRunning: boolean;
   checkDdu: () => Promise<DduPathResult>;
   executeDduPipeline: () => Promise<DduExecutionResult>;
+
+  // 4 Plan Buttons & Execution Status Modal
+  planExecutionModal: PlanExecutionModalState;
+  closePlanExecutionModal: () => void;
+  applyPlanOptimizations: (planLevel: PlanLevel, planName?: string) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
+  rollbackPlanOptimizations: (planLevel: PlanLevel, planName?: string) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
+  downloadDriverForVendor: (vendor?: 'AMD' | 'NVIDIA' | 'Intel') => Promise<void>;
+  installDriverForVendor: (vendor?: 'AMD' | 'NVIDIA' | 'Intel') => Promise<void>;
+}
+
+export interface PlanExecutionItem {
+  toolId: string;
+  toolName: string;
+  category: string;
+  before: string;
+  after: string;
+  status: 'SUCESSO' | 'FALHA' | 'REVERTIDO';
+  durationMs: number;
+}
+
+export interface PlanExecutionModalState {
+  isOpen: boolean;
+  planLevel: PlanLevel;
+  planName: string;
+  actionType: 'APPLY' | 'ROLLBACK';
+  items: PlanExecutionItem[];
+  successCount: number;
+  totalCount: number;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -406,6 +434,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isToolActive = (toolId: string): boolean => {
     return !!activeToolsState[toolId];
+  };
+
+  const [planExecutionModal, setPlanExecutionModal] = useState<PlanExecutionModalState>({
+    isOpen: false,
+    planLevel: 1,
+    planName: 'BÁSICO',
+    actionType: 'APPLY',
+    items: [],
+    successCount: 0,
+    totalCount: 0,
+  });
+
+  const closePlanExecutionModal = () => {
+    setPlanExecutionModal((prev) => ({ ...prev, isOpen: false }));
   };
 
   const [upgradeModal, setUpgradeModal] = useState<UpgradeModalData>({
@@ -1803,6 +1845,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         gpu_power_w: t.gpu_power_w ?? prev.gpu_power_w,
         gpu_memory_used_mb: t.gpu_memory_used_mb ?? prev.gpu_memory_used_mb,
         gpu_memory_total_mb: t.gpu_memory_total_mb ?? prev.gpu_memory_total_mb,
+        gpu: (prev.gpu === 'N/D' || prev.gpu.includes('Aguardando') || !prev.gpu) && t.gpu_model ? t.gpu_model : prev.gpu,
         ram_used_mb: t.ram_used_mb ?? prev.ram_used_mb,
         ram_total_mb: t.ram_total_mb ?? prev.ram_total_mb,
         fps: t.fps ?? prev.fps,
@@ -1813,7 +1856,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         active_game_pid: t.active_game_pid ?? prev.active_game_pid,
         active_game_name: t.active_game_name ?? prev.active_game_name,
         driver_version: t.driver_version ?? prev.driver_version,
+        resizable_bar: typeof t.rebar_enabled === 'boolean' ? t.rebar_enabled : prev.resizable_bar,
       }));
+    });
+
+    const unsubHw = agentBridge.onHardwareInventory((inv) => {
+      console.log('[AppContext] Inventário recebido do agente:', inv);
+      detectAndSetRealHardware(true);
+    });
+
+    const unsubStatus = agentBridge.onStatus((statusData) => {
+      console.log('[AppContext] Status recebido do agente:', statusData);
+      detectAndSetRealHardware(true);
     });
 
     // Escutar eventos do processo principal Electron sobre o dyarte-agent.exe
@@ -1834,6 +1888,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.log('[AppContext] cleanup chamado');
       unsub();
       unsubTelemetry();
+      unsubHw();
+      unsubStatus();
       if (unsubElectronAgent) unsubElectronAgent();
       // Não desconecta incondicionalmente no unmount de efeito do React StrictMode.
       // O agentBridge é um singleton estável de sessão da aplicação. Desconectar aqui abortaria
@@ -2496,6 +2552,257 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const applyPlanOptimizations = async (
+    planLevel: PlanLevel,
+    planName?: string
+  ): Promise<{ success: boolean; results: PlanExecutionItem[] }> => {
+    const targetName = planName || getPlanNameByLevel(planLevel);
+    setIsOptimizing(true);
+    addToast('info', `Iniciando Otimizações: ${targetName}`, `Aplicando rotinas do plano nível ${planLevel}...`);
+
+    const eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel);
+    const items: PlanExecutionItem[] = [];
+    let successCount = 0;
+
+    for (const t of eligibleTools) {
+      setActiveOptimizingToolId(t.tool_id);
+      const startTime = Date.now();
+      try {
+        const res = await optimizationEngine.applyTool(t.tool_id, planLevel);
+        const duration = Math.max(15, Date.now() - startTime);
+
+        if (res.success) {
+          successCount++;
+          setActiveToolsState((prev) => ({ ...prev, [t.tool_id]: true }));
+          items.push({
+            toolId: t.tool_id,
+            toolName: t.nome,
+            category: t.categoria,
+            before: res.beforeState?.status || `Padrão do Windows (${t.nome})`,
+            after: res.afterState?.status || res.message || `Otimização ${t.nome} ativa`,
+            status: 'SUCESSO',
+            durationMs: duration,
+          });
+
+          const historyItem: OptimizationHistoryItem = {
+            history_id: `hist_${Date.now()}_${t.tool_id}`,
+            user_id: currentUser?.user_id || 'user_local',
+            tool_id: t.tool_id,
+            tool_name: t.nome,
+            category: t.categoria,
+            date: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            status: 'SUCESSO',
+            result: `Otimização ${t.nome} aplicada e confirmada internamente.`,
+            before_state: res.beforeState || { status: 'Padrão' },
+            after_state: res.afterState || { status: 'Otimizado' },
+            verified: true,
+            duration_ms: duration,
+          };
+          setHistory((prev) => [historyItem, ...prev]);
+        } else {
+          items.push({
+            toolId: t.tool_id,
+            toolName: t.nome,
+            category: t.categoria,
+            before: 'Configuração atual do sistema',
+            after: res.error || 'Falha ao aplicar no Windows',
+            status: 'FALHA',
+            durationMs: duration,
+          });
+        }
+      } catch (err: any) {
+        items.push({
+          toolId: t.tool_id,
+          toolName: t.nome,
+          category: t.categoria,
+          before: 'Configuração atual do sistema',
+          after: err.message || 'Erro interno de execução',
+          status: 'FALHA',
+          durationMs: Date.now() - startTime,
+        });
+      }
+    }
+
+    setActiveOptimizingToolId(null);
+    setIsOptimizing(false);
+
+    setPlanExecutionModal({
+      isOpen: true,
+      planLevel,
+      planName: targetName,
+      actionType: 'APPLY',
+      items,
+      successCount,
+      totalCount: items.length,
+    });
+
+    addToast(
+      successCount > 0 ? 'success' : 'warning',
+      `Plano ${targetName} Executado`,
+      `${successCount} de ${items.length} otimizações aplicadas com confirmação interna.`
+    );
+
+    return { success: successCount > 0, results: items };
+  };
+
+  const rollbackPlanOptimizations = async (
+    planLevel: PlanLevel,
+    planName?: string
+  ): Promise<{ success: boolean; results: PlanExecutionItem[] }> => {
+    const targetName = planName || getPlanNameByLevel(planLevel);
+    setIsOptimizing(true);
+    addToast('info', `Revertendo Otimizações: ${targetName}`, `Restaurando configurações padrão do Windows para nível ${planLevel}...`);
+
+    const eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel && t.is_reversible);
+    const items: PlanExecutionItem[] = [];
+    let successCount = 0;
+
+    for (const t of eligibleTools) {
+      setActiveOptimizingToolId(t.tool_id);
+      const startTime = Date.now();
+      try {
+        const res = await optimizationEngine.rollbackTool(t.tool_id, planLevel);
+        const duration = Math.max(15, Date.now() - startTime);
+
+        if (res.success) {
+          successCount++;
+          setActiveToolsState((prev) => ({ ...prev, [t.tool_id]: false }));
+          items.push({
+            toolId: t.tool_id,
+            toolName: t.nome,
+            category: t.categoria,
+            before: `Otimização ${t.nome} ativa no sistema`,
+            after: res.restoredState?.status || res.message || `Padrão do Windows restaurado`,
+            status: 'REVERTIDO',
+            durationMs: duration,
+          });
+
+          const historyItem: OptimizationHistoryItem = {
+            history_id: `hist_rb_${Date.now()}_${t.tool_id}`,
+            user_id: currentUser?.user_id || 'user_local',
+            tool_id: t.tool_id,
+            tool_name: t.nome,
+            category: t.categoria,
+            date: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            status: 'REVERTIDO',
+            result: `Otimização ${t.nome} revertida para o padrão do Windows.`,
+            before_state: { status: 'Otimizado' },
+            after_state: res.restoredState || { status: 'Padrão Restaurado' },
+            verified: true,
+            duration_ms: duration,
+          };
+          setHistory((prev) => [historyItem, ...prev]);
+        } else {
+          items.push({
+            toolId: t.tool_id,
+            toolName: t.nome,
+            category: t.categoria,
+            before: 'Otimização ativa',
+            after: res.error || 'Falha ao reverter no Windows',
+            status: 'FALHA',
+            durationMs: duration,
+          });
+        }
+      } catch (err: any) {
+        items.push({
+          toolId: t.tool_id,
+          toolName: t.nome,
+          category: t.categoria,
+          before: 'Otimização ativa',
+          after: err.message || 'Erro interno ao reverter',
+          status: 'FALHA',
+          durationMs: Date.now() - startTime,
+        });
+      }
+    }
+
+    setActiveOptimizingToolId(null);
+    setIsOptimizing(false);
+
+    setPlanExecutionModal({
+      isOpen: true,
+      planLevel,
+      planName: targetName,
+      actionType: 'ROLLBACK',
+      items,
+      successCount,
+      totalCount: items.length,
+    });
+
+    addToast(
+      successCount > 0 ? 'success' : 'warning',
+      `Plano ${targetName} Revertido`,
+      `${successCount} de ${items.length} configurações restauradas para o padrão do Windows.`
+    );
+
+    return { success: successCount > 0, results: items };
+  };
+
+  const downloadDriverForVendor = async (vendor?: 'AMD' | 'NVIDIA' | 'Intel'): Promise<void> => {
+    let target = vendor;
+    if (!target) {
+      const gpu = (device.gpu || '').toLowerCase();
+      if (gpu.includes('amd') || gpu.includes('radeon')) target = 'AMD';
+      else if (gpu.includes('intel') || gpu.includes('arc') || gpu.includes('uhd')) target = 'Intel';
+      else target = 'NVIDIA';
+    }
+
+    addToast('info', `Baixar Driver ${target}`, `Iniciando download do pacote oficial de driver otimizado para ${target}...`);
+
+    if (typeof window !== 'undefined' && window.dyarte?.drivers?.findDriverInstaller) {
+      try {
+        if (target === 'AMD' || target === 'NVIDIA') {
+          const res = await window.dyarte.drivers.findDriverInstaller(target);
+          if (res.found) {
+            addToast('success', `Driver Encontrado`, `Driver ${target} localizado: ${res.fileName}`);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Erro ao verificar instalador local:', e);
+      }
+    }
+
+    const url = target === 'AMD'
+      ? (config.amd_driver_drive_url || 'https://www.amd.com/en/support/download/drivers.html')
+      : target === 'Intel'
+      ? 'https://www.intel.com/content/www/us/en/download-center/home.html'
+      : (config.nvidia_driver_drive_url || 'https://www.nvidia.com/Download/index.aspx');
+
+    window.open(url, '_blank', 'noopener,noreferrer');
+    addToast('success', `Download de Driver Aberto`, `Página de drivers otimizados para ${target} aberta no navegador.`);
+  };
+
+  const installDriverForVendor = async (vendor?: 'AMD' | 'NVIDIA' | 'Intel'): Promise<void> => {
+    let target = vendor;
+    if (!target) {
+      const gpu = (device.gpu || '').toLowerCase();
+      if (gpu.includes('amd') || gpu.includes('radeon')) target = 'AMD';
+      else if (gpu.includes('intel') || gpu.includes('arc')) target = 'Intel';
+      else target = 'NVIDIA';
+    }
+
+    addToast('info', `Instalar Driver ${target}`, `Iniciando rotina de instalação e calibração de driver para ${target}...`);
+
+    if (typeof window !== 'undefined' && window.dyarte?.drivers?.executeDriverInstaller && (target === 'AMD' || target === 'NVIDIA')) {
+      try {
+        const res = await window.dyarte.drivers.executeDriverInstaller(target);
+        if (res.success) {
+          addToast('success', `Instalação Iniciada`, `Instalador oficial do driver ${target} iniciado com êxito.`);
+          return;
+        }
+      } catch (e) {
+        console.warn('Erro ao executar instalador via IPC:', e);
+      }
+    }
+
+    if (target === 'AMD' || target === 'NVIDIA') {
+      executeDriverPipeline(target);
+    } else {
+      addToast('info', 'Instalação de Driver', `Execute o arquivo do instalador baixado na pasta de downloads ou drivers.`);
+    }
+  };
+
   // License manual key activation
   const activateLicenseKey = (key: string): { success: boolean; message: string } => {
     const formatted = (key || '').trim().toUpperCase();
@@ -2928,6 +3235,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isDduRunning,
     checkDdu,
     executeDduPipeline,
+    planExecutionModal,
+    closePlanExecutionModal,
+    applyPlanOptimizations,
+    rollbackPlanOptimizations,
+    downloadDriverForVendor,
+    installDriverForVendor,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

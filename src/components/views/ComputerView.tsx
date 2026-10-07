@@ -163,11 +163,24 @@ export const ComputerView: React.FC = () => {
             <Layers className="w-4 h-4 text-amber-400" />
           </div>
           <div>
-            <h3 className="text-base font-bold text-white font-mono leading-snug">
-              {device.ram || 'N/D'}
-            </h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-bold text-white font-mono leading-snug">
+                {device.ram || 'N/D'}
+              </h3>
+              {device.xmp_profile && (
+                <span
+                  className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold uppercase ${
+                    device.xmp_profile.includes('Ativo') || device.xmp_profile === 'ENABLED'
+                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-700/50'
+                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                  }`}
+                >
+                  {device.xmp_profile}
+                </span>
+              )}
+            </div>
             <p className="text-xs text-zinc-400 mt-1">
-              {t('comp_ram_sub')}
+              {device.ram_frequency ? `Frequência: ${device.ram_frequency}` : t('comp_ram_sub')}
             </p>
           </div>
           <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between text-xs font-mono">

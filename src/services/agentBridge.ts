@@ -74,9 +74,13 @@ class AgentBridgeService {
   private connectionState: AgentConnectionState = 'AGENT_OFFLINE';
   private telemetryListeners: Set<AgentMessageListener> = new Set();
   private stateListeners: Set<AgentStateListener> = new Set();
+  private inventoryListeners: Set<(inv: HardwareInventory) => void> = new Set();
+  private statusListeners: Set<(status: AgentStatusResponse) => void> = new Set();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private currentSnapshot: TelemetrySnapshot | null = null;
+  private latestHardwareInventory: HardwareInventory | null = null;
+  private latestStatus: AgentStatusResponse | null = null;
   private lastPingTimestamp: number = 0;
   private lastLatencyMs: number = 0;
 
@@ -96,6 +100,38 @@ class AgentBridgeService {
 
   public getLatestTelemetry(): SystemTelemetry | null {
     return this.currentSnapshot ? this.currentSnapshot.telemetry : null;
+  }
+
+  public getLatestHardwareInventory(): HardwareInventory | null {
+    return this.latestHardwareInventory;
+  }
+
+  public getLatestStatus(): AgentStatusResponse | null {
+    return this.latestStatus;
+  }
+
+  public onHardwareInventory(listener: (inv: HardwareInventory) => void): () => void {
+    this.inventoryListeners.add(listener);
+    if (this.latestHardwareInventory) {
+      try {
+        listener(this.latestHardwareInventory);
+      } catch (err) {
+        console.error('Erro no listener de inventário:', err);
+      }
+    }
+    return () => this.inventoryListeners.delete(listener);
+  }
+
+  public onStatus(listener: (status: AgentStatusResponse) => void): () => void {
+    this.statusListeners.add(listener);
+    if (this.latestStatus) {
+      try {
+        listener(this.latestStatus);
+      } catch (err) {
+        console.error('Erro no listener de status:', err);
+      }
+    }
+    return () => this.statusListeners.delete(listener);
   }
 
   public onTelemetry(listener: AgentMessageListener): () => void {
@@ -479,6 +515,11 @@ class AgentBridgeService {
       if (msg.status === 'ONLINE') {
         this.setState('AGENT_ONLINE');
         this.startHeartbeat();
+        // Dispara requisição inicial de inventário e status para pré-carregamento
+        setTimeout(() => {
+          this.getHardwareInventory(8000).catch(() => {});
+          this.getStatus(5000).catch(() => {});
+        }, 100);
       }
       return;
     }
@@ -563,7 +604,38 @@ class AgentBridgeService {
       this.telemetryListeners.forEach((listener) => listener(snapshot));
     }
 
-    // Request ID correlation (e.g. TEST_CONNECTION_RESULT, GET_STATUS, GET_TELEMETRY)
+    // Armazenar inventário e status sempre que recebidos (por requisição ou push proativo)
+    if (msg.type === 'HARDWARE_INVENTORY_RESULT' && msg.inventory) {
+      let inv = msg.inventory;
+      if (typeof inv === 'string') {
+        try {
+          inv = JSON.parse(inv);
+        } catch {
+          // ignore
+        }
+      }
+      this.latestHardwareInventory = inv;
+      this.inventoryListeners.forEach((listener) => {
+        try {
+          listener(inv);
+        } catch (e) {
+          console.error('Erro ao notificar listener de inventário:', e);
+        }
+      });
+    }
+
+    if (msg.type === 'STATUS_RESULT') {
+      this.latestStatus = msg;
+      this.statusListeners.forEach((listener) => {
+        try {
+          listener(msg);
+        } catch (e) {
+          console.error('Erro ao notificar listener de status:', e);
+        }
+      });
+    }
+
+    // Request ID correlation (e.g. TEST_CONNECTION_RESULT, GET_STATUS, GET_TELEMETRY, GET_HARDWARE_INVENTORY)
     if (msg.request_id && this.pendingRequests.has(msg.request_id)) {
       const pending = this.pendingRequests.get(msg.request_id);
       this.pendingRequests.delete(msg.request_id);

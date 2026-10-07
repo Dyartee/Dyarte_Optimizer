@@ -17,6 +17,7 @@ import { PlanId } from '../../types';
 import { EditHardwareModal } from '../modals/EditHardwareModal';
 import { SafetyLockModal } from '../modals/SafetyLockModal';
 import { DriverPipelineModal } from '../modals/DriverPipelineModal';
+import { PlanExecutionModal } from '../modals/PlanExecutionModal';
 
 export const Modals: React.FC = () => {
   const {
@@ -248,6 +249,7 @@ export const Modals: React.FC = () => {
       <EditHardwareModal />
       <SafetyLockModal />
       <DriverPipelineModal />
+      <PlanExecutionModal />
     </>
   );
 };

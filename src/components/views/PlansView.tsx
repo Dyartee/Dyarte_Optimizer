@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Plan } from '../../types';
 import {
@@ -10,10 +10,28 @@ import {
   Gem,
   HelpCircle,
   ShieldCheck,
+  Zap,
+  RotateCcw,
+  Download,
+  Play,
 } from 'lucide-react';
 
 export const PlansView: React.FC = () => {
-  const { plans, currentUser, config, addToast, t } = useApp();
+  const {
+    plans,
+    currentUser,
+    config,
+    addToast,
+    t,
+    applyPlanOptimizations,
+    rollbackPlanOptimizations,
+    downloadDriverForVendor,
+    installDriverForVendor,
+    isOptimizing,
+  } = useApp();
+
+  const [executingPlanId, setExecutingPlanId] = useState<string | null>(null);
+  const [executingAction, setExecutingAction] = useState<'apply' | 'rollback' | null>(null);
 
   const handleExternalBuy = (plan: Plan) => {
     const url = config[plan.checkoutUrlKey] || 'https://dyarte.com/planos';
@@ -191,27 +209,92 @@ export const PlansView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Action Button */}
-              <div className="pt-2">
-                {isCurrentPlan ? (
-                  <div className="w-full py-3 px-4 rounded-xl bg-[#E00000]/20 border border-[#E00000] text-white text-xs font-mono font-bold text-center uppercase tracking-wider flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(224,0,0,0.3)]">
-                    <CheckCircle2 className="w-4 h-4 text-[#FF4444]" />
-                    <span>{t('plan_current_active')}</span>
-                  </div>
-                ) : isPreviousPlan ? (
-                  <div className="w-full py-3 px-4 rounded-xl bg-zinc-900/90 border border-zinc-800 text-zinc-500 text-xs font-mono font-semibold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-zinc-600" />
-                    <span>{t('plan_included_in_plan')}</span>
-                  </div>
-                ) : (
+              {/* 4 Plan Buttons & Actions */}
+              <div className="space-y-2 pt-3 border-t border-zinc-800/80">
+                {/* Row 1: APLICAR TUDO & REVERTER TUDO */}
+                <div className="grid grid-cols-2 gap-2">
                   <button
-                    onClick={() => handleExternalBuy(plan)}
-                    className="w-full py-3 px-4 rounded-xl text-xs font-mono font-extrabold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer bg-[#E00000] hover:bg-[#c50000] text-white shadow-[0_0_20px_rgba(224,0,0,0.4)] hover:shadow-[0_0_28px_rgba(224,0,0,0.6)]"
+                    onClick={async () => {
+                      setExecutingPlanId(plan.id);
+                      setExecutingAction('apply');
+                      try {
+                        await applyPlanOptimizations(plan.level, plan.name);
+                      } finally {
+                        setExecutingPlanId(null);
+                        setExecutingAction(null);
+                      }
+                    }}
+                    disabled={isOptimizing}
+                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#E00000] hover:bg-[#c50000] text-white shadow-[0_0_15px_rgba(224,0,0,0.35)] disabled:opacity-50"
+                    title="Aplica todas as otimizações deste plano internamente no Windows com status Antes/Depois"
                   >
-                    <span>{isFree ? 'Plano Ativo Grátis' : t('plan_buy_official')}</span>
-                    {!isFree && <ExternalLink className="w-3.5 h-3.5" />}
+                    <Zap className={`w-3.5 h-3.5 fill-current ${executingPlanId === plan.id && executingAction === 'apply' ? 'animate-pulse' : ''}`} />
+                    <span>{executingPlanId === plan.id && executingAction === 'apply' ? 'Aplicando...' : 'APLICAR TUDO'}</span>
                   </button>
-                )}
+
+                  <button
+                    onClick={async () => {
+                      setExecutingPlanId(plan.id);
+                      setExecutingAction('rollback');
+                      try {
+                        await rollbackPlanOptimizations(plan.level, plan.name);
+                      } finally {
+                        setExecutingPlanId(null);
+                        setExecutingAction(null);
+                      }
+                    }}
+                    disabled={isOptimizing}
+                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/80 disabled:opacity-50"
+                    title="Reverte todas as otimizações deste plano para o padrão de fábrica do Windows com status Antes/Depois"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${executingPlanId === plan.id && executingAction === 'rollback' ? 'animate-spin' : ''}`} />
+                    <span>{executingPlanId === plan.id && executingAction === 'rollback' ? 'Revertendo...' : 'REVERTER TUDO'}</span>
+                  </button>
+                </div>
+
+                {/* Row 2: BAIXAR DRIVER & INSTALAR DRIVER */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => downloadDriverForVendor()}
+                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shadow-sm"
+                    title="Baixar pacote de driver oficial otimizado para o seu hardware"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>BAIXAR DRIVER</span>
+                  </button>
+
+                  <button
+                    onClick={() => installDriverForVendor()}
+                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-blue-950/40 hover:bg-blue-900/60 text-blue-300 border border-blue-700/50 shadow-sm"
+                    title="Iniciar rotina de instalação e calibração do driver no Windows"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current text-blue-400" />
+                    <span>INSTALAR DRIVER</span>
+                  </button>
+                </div>
+
+                {/* Status / Purchase Link */}
+                <div className="pt-1">
+                  {isCurrentPlan ? (
+                    <div className="w-full py-2 px-3 rounded-xl bg-zinc-900/90 border border-emerald-600/40 text-emerald-400 text-[10px] font-mono font-bold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{t('plan_current_active')}</span>
+                    </div>
+                  ) : isPreviousPlan ? (
+                    <div className="w-full py-2 px-3 rounded-xl bg-zinc-900/80 border border-zinc-800 text-zinc-400 text-[10px] font-mono font-semibold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
+                      <Check className="w-3 h-3 text-zinc-500" />
+                      <span>{t('plan_included_in_plan')}</span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handleExternalBuy(plan)}
+                      className="w-full py-2 px-3 rounded-xl text-[10px] font-mono font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700"
+                    >
+                      <span>{isFree ? 'Plano Ativo Grátis' : t('plan_buy_official')}</span>
+                      {!isFree && <ExternalLink className="w-3 h-3 text-zinc-400" />}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           );

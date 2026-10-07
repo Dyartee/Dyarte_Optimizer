@@ -216,7 +216,7 @@ export const DashboardView: React.FC = () => {
         </div>
 
         {/* Hardware Metrics Horizontal Panels */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3.5">
           {/* CPU */}
           <div className="p-4 rounded-xl bg-[#121217] border border-[#22222d] flex flex-col justify-between hover:border-[#333345] transition-all group">
             <div className="flex items-center justify-between text-zinc-400 mb-2">
@@ -278,9 +278,22 @@ export const DashboardView: React.FC = () => {
                 <HardDrive className="w-4 h-4 text-amber-400" />
                 <span>RAM</span>
               </div>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-800/40">
-                {device.ram_frequency || 'N/D'}
-              </span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {device.xmp_profile && (
+                  <span
+                    className={`text-[9px] font-mono px-1 py-0.5 rounded font-bold uppercase ${
+                      device.xmp_profile.includes('Ativo') || device.xmp_profile === 'ENABLED'
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-700/50'
+                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                    }`}
+                  >
+                    {device.xmp_profile}
+                  </span>
+                )}
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-800/40">
+                  {device.ram_frequency || 'N/D'}
+                </span>
+              </div>
             </div>
             <div className="flex items-baseline justify-between gap-2">
               <span className="text-2xl font-extrabold text-white font-mono">
@@ -294,6 +307,39 @@ export const DashboardView: React.FC = () => {
               <div
                 className="h-full bg-amber-500 rounded-full transition-all duration-500"
                 style={{ width: `${device.ram_usage_pct ?? 0}%` }}
+              />
+            </div>
+          </div>
+
+          {/* ARMAZENAMENTO */}
+          <div className="p-4 rounded-xl bg-[#121217] border border-[#22222d] flex flex-col justify-between hover:border-[#333345] transition-all group">
+            <div className="flex items-center justify-between text-zinc-400 mb-2">
+              <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider">
+                <HardDrive className="w-4 h-4 text-blue-400" />
+                <span>DISCO</span>
+              </div>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-950/50 text-blue-300 border border-blue-800/40">
+                {device.storage_free_gb !== null ? `${device.storage_free_gb} GB Livres` : 'Detectado'}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-2xl font-extrabold text-white font-mono">
+                {device.storage_free_gb !== null && device.storage_total_gb
+                  ? `${Math.round(((device.storage_total_gb - device.storage_free_gb) / device.storage_total_gb) * 100)}%`
+                  : 'OK'}
+              </span>
+              <span className="text-xs text-zinc-300 font-mono truncate max-w-[120px]" title={device.storage}>
+                {device.storage || 'N/D'}
+              </span>
+            </div>
+            <div className="w-full h-1.5 bg-zinc-800 rounded-full mt-3 overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                style={{
+                  width: `${device.storage_free_gb !== null && device.storage_total_gb
+                    ? Math.min(100, Math.round(((device.storage_total_gb - device.storage_free_gb) / device.storage_total_gb) * 100))
+                    : 50}%`
+                }}
               />
             </div>
           </div>

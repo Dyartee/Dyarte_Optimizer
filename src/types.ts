@@ -127,6 +127,8 @@ export interface DeviceInfo {
   gpu: string;
   ram: string;
   storage: string;
+  storage_free_gb?: number | null;
+  storage_total_gb?: number | null;
   motherboard: string;
   motherboard_chipset?: string;
   bios_version?: string;

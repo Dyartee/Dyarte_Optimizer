@@ -206,22 +206,23 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
 
   const isAgentOnline = agentBridge.getState() === 'AGENT_ONLINE';
 
-  let agentStatus: any = null;
-  let hardwareInv: any = null;
+  let agentStatus: any = agentBridge.getLatestStatus();
+  let hardwareInv: any = agentBridge.getLatestHardwareInventory();
 
   if (isAgentOnline) {
     try {
-      const [statusRes, invRes] = await Promise.all([
-        agentBridge.getStatus(2000),
-        agentBridge.getHardwareInventory(3000),
+      const results = await Promise.allSettled([
+        agentBridge.getStatus(5000),
+        agentBridge.getHardwareInventory(8000),
       ]);
-      agentStatus = statusRes;
-      if (invRes?.success && invRes.inventory) {
-        hardwareInv = invRes.inventory;
+      if (results[0].status === 'fulfilled' && results[0].value) {
+        agentStatus = results[0].value;
+      }
+      if (results[1].status === 'fulfilled' && results[1].value?.success && results[1].value?.inventory) {
+        hardwareInv = results[1].value.inventory;
       }
     } catch {
-      agentStatus = null;
-      hardwareInv = null;
+      // Manter valores em cache se a requisição pontual falhar
     }
   }
 
@@ -233,42 +234,84 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     verifiedCpu = hardwareInv.cpu.model;
   } else if (isAgentOnline && agentStatus?.cpu && agentStatus.cpu !== 'N/D') {
     verifiedCpu = agentStatus.cpu;
+  } else if (existingDevice?.cpu && existingDevice.cpu !== 'N/D' && !existingDevice.cpu.includes('Aguardando') && !existingDevice.cpu.includes('Não reportado')) {
+    verifiedCpu = existingDevice.cpu;
+  } else {
+    const browserCpu = detectRealCPU();
+    if (browserCpu && browserCpu.name !== 'N/D') {
+      verifiedCpu = browserCpu.name;
+    }
   }
 
   // GPU REAL
   let verifiedGpu: string | null = officialGpu;
+  const latestTel = agentBridge.getLatestTelemetry();
   if (!verifiedGpu && hardwareInv?.gpu?.full_name && hardwareInv.gpu.full_name !== 'N/D') {
     verifiedGpu = hardwareInv.gpu.full_name;
+  } else if (!verifiedGpu && Array.isArray(hardwareInv?.gpus) && hardwareInv.gpus[0]?.name && hardwareInv.gpus[0].name !== 'N/D') {
+    verifiedGpu = hardwareInv.gpus.map((g: any) => g.name).filter(Boolean).join(' / ');
   } else if (!verifiedGpu && isAgentOnline && agentStatus?.gpu && agentStatus.gpu !== 'N/D') {
     verifiedGpu = agentStatus.gpu;
+  } else if (!verifiedGpu && latestTel?.gpu_model && latestTel.gpu_model !== 'N/D') {
+    verifiedGpu = latestTel.gpu_model;
+  } else if (!verifiedGpu && existingDevice?.gpu && existingDevice.gpu !== 'N/D' && !existingDevice.gpu.includes('Aguardando') && !existingDevice.gpu.includes('Não reportado')) {
+    verifiedGpu = existingDevice.gpu;
+  } else if (!verifiedGpu) {
+    const browserGpu = detectRealGPU();
+    if (browserGpu && browserGpu !== 'N/D') {
+      verifiedGpu = browserGpu;
+    }
   }
 
   // RAM REAL
   let verifiedRam: string | null = null;
   const ramTotalMb = typeof hardwareInv?.ram?.total_mb === 'number'
     ? hardwareInv.ram.total_mb
-    : (typeof hardwareInv?.memory?.total_mb === 'number' ? hardwareInv.memory.total_mb : null);
+    : (typeof hardwareInv?.memory?.total_mb === 'number'
+      ? hardwareInv.memory.total_mb
+      : (typeof latestTel?.ram_total_mb === 'number' ? latestTel.ram_total_mb : null));
 
   if (ramTotalMb && ramTotalMb > 0) {
     const gb = Math.round((ramTotalMb / 1024) * 10) / 10;
     verifiedRam = `${gb} GB RAM`;
   } else if (isAgentOnline && agentStatus?.ram && agentStatus.ram !== 'N/D') {
     verifiedRam = agentStatus.ram;
+  } else if (existingDevice?.ram && existingDevice.ram !== 'N/D' && !existingDevice.ram.includes('Aguardando') && !existingDevice.ram.includes('Não reportado')) {
+    verifiedRam = existingDevice.ram;
+  } else {
+    const browserRam = detectRealRAM();
+    if (browserRam && browserRam.formatted !== 'N/D') {
+      verifiedRam = browserRam.formatted;
+    }
   }
 
   // STORAGE REAL (Disks and Volumes)
   let verifiedStorage: string | null = null;
-  if (Array.isArray(hardwareInv?.storage?.disks) && hardwareInv.storage.disks.length > 0) {
+  let storageFreeGb: number | null = null;
+  let storageTotalGb: number | null = null;
+
+  if (Array.isArray(hardwareInv?.storage?.volumes) && hardwareInv.storage.volumes.length > 0) {
+    const primaryVol = hardwareInv.storage.volumes.find((v: any) => v.is_system) || hardwareInv.storage.volumes[0];
+    if (typeof primaryVol.free_gb === 'number' && typeof primaryVol.total_gb === 'number') {
+      storageFreeGb = primaryVol.free_gb;
+      storageTotalGb = primaryVol.total_gb;
+      verifiedStorage = `Disco ${primaryVol.drive} (${primaryVol.free_gb} GB livres de ${primaryVol.total_gb} GB)`;
+    } else {
+      verifiedStorage = `Volume ${primaryVol.drive} (${primaryVol.total_gb || 'N/D'} GB)`;
+    }
+  } else if (Array.isArray(hardwareInv?.storage?.disks) && hardwareInv.storage.disks.length > 0) {
     const primaryDisk = hardwareInv.storage.disks.find((d: any) => d.is_system) || hardwareInv.storage.disks[0];
     const diskModel = primaryDisk.model && primaryDisk.model !== 'N/D' ? primaryDisk.model : (primaryDisk.manufacturer && primaryDisk.manufacturer !== 'N/D' ? primaryDisk.manufacturer : 'Disco');
     const diskType = primaryDisk.media_type && primaryDisk.media_type !== 'N/D' ? ` ${primaryDisk.media_type}` : '';
     const diskCap = primaryDisk.size_gb > 0 ? ` (${primaryDisk.size_gb} GB${diskType})` : '';
+    storageTotalGb = primaryDisk.size_gb || null;
     verifiedStorage = `${diskModel}${diskCap}`.trim();
-  } else if (Array.isArray(hardwareInv?.storage?.volumes) && hardwareInv.storage.volumes.length > 0) {
-    const primaryVol = hardwareInv.storage.volumes.find((v: any) => v.is_system) || hardwareInv.storage.volumes[0];
-    verifiedStorage = `Volume ${primaryVol.drive} (${primaryVol.total_gb || 'N/D'} GB)`;
   } else if (isAgentOnline && agentStatus?.storage && agentStatus.storage !== 'N/D') {
     verifiedStorage = agentStatus.storage;
+  } else if (existingDevice?.storage && existingDevice.storage !== 'N/D') {
+    verifiedStorage = existingDevice.storage;
+    storageFreeGb = existingDevice.storage_free_gb ?? null;
+    storageTotalGb = existingDevice.storage_total_gb ?? null;
   }
 
   // MOTHERBOARD REAL
@@ -278,12 +321,16 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     verifiedMobo = `${mfg}${hardwareInv.motherboard.product_name}`.trim();
   } else if (isAgentOnline && agentStatus?.motherboard && agentStatus.motherboard !== 'N/D') {
     verifiedMobo = agentStatus.motherboard;
+  } else if (existingDevice?.motherboard && existingDevice.motherboard !== 'N/D') {
+    verifiedMobo = existingDevice.motherboard;
   }
 
   // BIOS REAL
   const verifiedBios = hardwareInv?.bios?.version && hardwareInv.bios.version !== 'N/D'
     ? hardwareInv.bios.version
-    : (isAgentOnline && agentStatus?.bios_version && agentStatus.bios_version !== 'N/D' ? agentStatus.bios_version : undefined);
+    : (isAgentOnline && agentStatus?.bios_version && agentStatus.bios_version !== 'N/D'
+      ? agentStatus.bios_version
+      : (existingDevice?.bios_version && existingDevice.bios_version !== 'N/D' ? existingDevice.bios_version : undefined));
 
   // SECURE BOOT REAL
   let verifiedSecureBoot: boolean | null = null;
@@ -291,6 +338,8 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     verifiedSecureBoot = hardwareInv.security.secure_boot;
   } else if (isAgentOnline && typeof agentStatus?.secure_boot === 'boolean') {
     verifiedSecureBoot = agentStatus.secure_boot;
+  } else if (typeof existingDevice?.secure_boot === 'boolean') {
+    verifiedSecureBoot = existingDevice.secure_boot;
   }
 
   // RESIZABLE BAR REAL (SUPPORTED, ENABLED, DISABLED, N/D, null)
@@ -300,13 +349,20 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     verifiedRebar = true;
   } else if (rebarStatus === 'DISABLED') {
     verifiedRebar = false;
+  } else if (typeof latestTel?.rebar_enabled === 'boolean') {
+    verifiedRebar = latestTel.rebar_enabled;
+  } else if (typeof existingDevice?.resizable_bar === 'boolean') {
+    verifiedRebar = existingDevice.resizable_bar;
   }
 
   // XMP / EXPO REAL
-  const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo;
-  const verifiedXmp = xmpStatus && xmpStatus !== 'UNKNOWN' && xmpStatus !== 'N/D'
-    ? (xmpStatus === 'ENABLED' ? 'XMP Ativo' : (xmpStatus === 'DISABLED' ? 'XMP Desativado' : xmpStatus))
-    : null;
+  const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo || hardwareInv?.xmp_profile;
+  let verifiedXmp: string | null = null;
+  if (xmpStatus && xmpStatus !== 'UNKNOWN' && xmpStatus !== 'N/D') {
+    verifiedXmp = xmpStatus === 'ENABLED' ? 'XMP Ativo' : (xmpStatus === 'DISABLED' ? 'XMP Desativado' : xmpStatus);
+  } else if (existingDevice?.xmp_profile) {
+    verifiedXmp = existingDevice.xmp_profile;
+  }
 
   // AGENT VERSION REAL (Requirement 21: Never hardcode '1.1.0')
   const detectedAgentVersion = hardwareInv?.agent_version && hardwareInv.agent_version !== 'N/D'
@@ -321,13 +377,15 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   const gpuTemp = typeof hardwareInv?.temperatures?.gpu_c === 'number' ? hardwareInv.temperatures.gpu_c : null;
 
   const rawRamFreq = hardwareInv?.ram?.frequency_mhz || hardwareInv?.ram?.speed_mhz || hardwareInv?.ram?.modules?.[0]?.speed_mhz;
-  const ramFreqFormatted = rawRamFreq ? `${rawRamFreq} MHz` : null;
+  const ramFreqFormatted = rawRamFreq ? `${rawRamFreq} MHz` : (existingDevice?.ram_frequency || null);
 
   return {
     cpu: verifiedCpu || (isAgentOnline ? 'Não reportado pelo Agent' : offlineLabel),
     gpu: verifiedGpu || (isAgentOnline ? 'Não reportado pelo Agent' : offlineLabel),
     ram: verifiedRam || (isAgentOnline ? 'Não reportado pelo Agent' : 'N/D'),
     storage: verifiedStorage || 'N/D',
+    storage_free_gb: storageFreeGb,
+    storage_total_gb: storageTotalGb,
     motherboard: verifiedMobo || 'N/D',
     motherboard_chipset: hardwareInv?.motherboard?.chipset && hardwareInv.motherboard.chipset !== 'N/D' ? hardwareInv.motherboard.chipset : undefined,
     bios_version: verifiedBios,

@@ -51,7 +51,7 @@ interface NonceEntry {
 
 // PROBLEMA 5: Aumentada capacidade para 200.000 entradas para comportar a janela de 60s
 // com proteção ativa contra DoS e limite por usuário.
-const MAX_NONCE_STORE_CAPACITY = 200000;
+const MAX_NONCE_STORE_CAPACITY = Number(process.env.NONCE_STORE_CAPACITY) || 200000;
 const MAX_NONCES_PER_USER = 1000; // Limite defensivo por usuário ativo na janela de 60s
 const userNonceCounts = new Map<string, number>();
 
@@ -147,18 +147,10 @@ export function getServerSigningPrivateKey(): crypto.KeyObject {
 
   const rawKeyHex = (process.env.OPTIMIZATION_SIGNING_PRIVATE_KEY || '').trim();
 
-  if (!rawKeyHex) {
+  if (!rawKeyHex || rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
     throw new Error(
-      '[CONFIG_KEY_MISSING] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY não está configurada no servidor. ' +
-      'Fail-closed: startup abortado. Formato esperado: exatamente 64 caracteres hexadecimais (32 bytes).'
-    );
-  }
-
-  if (rawKeyHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
-    throw new Error(
-      '[CONFIG_KEY_INVALID] A variável de ambiente OPTIMIZATION_SIGNING_PRIVATE_KEY é inválida. ' +
-      'Não são aceitas senhas, passphrases, webhooks ou strings arbitrárias. ' +
-      'Formato estrito obrigatório: exatamente 64 caracteres hexadecimais (32 bytes).'
+      '[CONFIG_KEY_INVALID] A variável OPTIMIZATION_SIGNING_PRIVATE_KEY deve conter exatamente 64 caracteres hexadecimais (32 bytes). ' +
+      'Nenhum fallback será usado. Servidor encerrado por segurança.'
     );
   }
 
@@ -170,8 +162,7 @@ export function getServerSigningPrivateKey(): crypto.KeyObject {
     });
     return cachedPrivateKey;
   } catch (err: any) {
-    const errorMsg = `[CONFIG_KEY_INVALID] Falha ao instanciar chave privada Ed25519: ${err?.message || err}`;
-    throw new Error(errorMsg);
+    throw new Error(`[CONFIG_KEY_INVALID] Falha ao instanciar chave privada Ed25519: ${err?.message || err}`);
   }
 }
 

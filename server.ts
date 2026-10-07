@@ -47,6 +47,13 @@ import {
 } from './src/security/serverTokens';
 import { GeminiAiProvider } from './src/services/geminiAiProvider';
 
+// PROBLEMA 4 / ITEM 5: Comparação em tempo constante de strings para prevenir timing attacks
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
 const geminiAiProvider = new GeminiAiProvider();
 
 // Section 6: Fail-closed server startup check. Must refuse startup if signing key is invalid/unconfigured.
@@ -1330,43 +1337,27 @@ app.post('/api/webhook/cakto', async (req: Request, res: Response) => {
       });
     }
 
-    const authHeader = (req.headers['authorization'] || req.headers['x-webhook-secret'] || '') as string;
-    const hmacHeader = (req.headers['x-cakto-signature'] || req.headers['x-hub-signature-256'] || '') as string;
+    const rawAuth = (req.headers['authorization'] || req.headers['x-webhook-secret'] || '').toString();
+    const authHeader = rawAuth.startsWith('Bearer ') ? rawAuth.slice(7) : rawAuth;
 
-    // 1. Constant-time comparison for secret token / bearer header (Problema 4)
-    const normalizedAuth = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const serverSecretBuf = Buffer.from(serverSecret, 'utf8');
-    const incomingSecretBuf = Buffer.from(normalizedAuth, 'utf8');
-
-    let secretMatches = false;
-    if (incomingSecretBuf.length === serverSecretBuf.length) {
-      secretMatches = crypto.timingSafeEqual(incomingSecretBuf, serverSecretBuf);
-    }
-
-    // 2. Validate cryptographic HMAC of body payload if HMAC signature header is provided
-    let hmacMatches = true;
-    if (hmacHeader) {
-      const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
-      const expectedHmac = crypto.createHmac('sha256', serverSecret).update(rawBody).digest('hex');
-      const expectedHmacBuf = Buffer.from(expectedHmac, 'utf8');
-      const cleanHmacHeader = hmacHeader.replace(/^sha256=/, '');
-      const incomingHmacBuf = Buffer.from(cleanHmacHeader, 'utf8');
-
-      if (incomingHmacBuf.length === expectedHmacBuf.length) {
-        hmacMatches = crypto.timingSafeEqual(incomingHmacBuf, expectedHmacBuf);
-      } else {
-        hmacMatches = false;
-      }
-    }
-
-    if (!secretMatches || !hmacMatches) {
-      console.warn('[Security] [Webhook] Tentativa de acesso com segredo ou HMAC inválido:', {
+    if (!authHeader || !safeEqual(authHeader, serverSecret)) {
+      console.warn('[Security] [Webhook] Tentativa de acesso com segredo inválido ou ausente:', {
         ip: req.ip,
-        secretOk: secretMatches,
-        hmacOk: hmacMatches,
         timestamp: new Date().toISOString(),
       });
       return res.status(401).json({ error: 'Assinatura ou segredo do webhook inválido.' });
+    }
+
+    // Validação adicional opcional de HMAC de payload se enviado pelo gateway
+    const hmacHeader = (req.headers['x-cakto-signature'] || req.headers['x-hub-signature-256'] || '') as string;
+    if (hmacHeader) {
+      const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+      const expectedHmac = crypto.createHmac('sha256', serverSecret).update(rawBody).digest('hex');
+      const cleanHmac = hmacHeader.replace(/^sha256=/, '');
+      if (!safeEqual(cleanHmac, expectedHmac)) {
+        console.warn('[Security] [Webhook] HMAC de payload inválido:', { ip: req.ip });
+        return res.status(401).json({ error: 'Assinatura ou segredo do webhook inválido.' });
+      }
     }
 
     const { email, plan_id, transaction_id, customer_name } = req.body;
@@ -1719,12 +1710,12 @@ async function startServer() {
     });
   }
 
-  // PROBLEMA 3: Servidor local escutando estritamente em loopback (127.0.0.1) para impedir exposição na rede local
-  // Em ambientes de nuvem (Cloud Run/Docker), BIND_HOST ou HOST pode ser configurado explicitamente via env
-  const HOST = process.env.BIND_HOST || process.env.HOST || (process.env.NODE_ENV === 'production' && process.env.K_SERVICE ? '0.0.0.0' : '127.0.0.1');
+  // Local/Electron: loopback apenas (não expor a API na rede local).
+  // Cloud Run: defina HOST=0.0.0.0 nas variáveis de ambiente do deploy.
+  const HOST = process.env.HOST || '127.0.0.1';
 
   app.listen(PORT, HOST, () => {
-    console.log(`DYARTE OPTIMIZER Server listening strictly on http://${HOST}:${PORT}`);
+    console.log(`DYARTE OPTIMIZER Server listening on http://${HOST}:${PORT}`);
   });
 }
 

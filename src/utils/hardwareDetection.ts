@@ -305,7 +305,7 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   // XMP / EXPO REAL
   const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo;
   const verifiedXmp = xmpStatus && xmpStatus !== 'UNKNOWN' && xmpStatus !== 'N/D'
-    ? xmpStatus
+    ? (xmpStatus === 'ENABLED' ? 'XMP Ativo' : (xmpStatus === 'DISABLED' ? 'XMP Desativado' : xmpStatus))
     : null;
 
   // AGENT VERSION REAL (Requirement 21: Never hardcode '1.1.0')
@@ -320,6 +320,9 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   const cpuTemp = typeof hardwareInv?.temperatures?.cpu_c === 'number' ? hardwareInv.temperatures.cpu_c : null;
   const gpuTemp = typeof hardwareInv?.temperatures?.gpu_c === 'number' ? hardwareInv.temperatures.gpu_c : null;
 
+  const rawRamFreq = hardwareInv?.ram?.frequency_mhz || hardwareInv?.ram?.speed_mhz || hardwareInv?.ram?.modules?.[0]?.speed_mhz;
+  const ramFreqFormatted = rawRamFreq ? `${rawRamFreq} MHz` : null;
+
   return {
     cpu: verifiedCpu || (isAgentOnline ? 'Não reportado pelo Agent' : offlineLabel),
     gpu: verifiedGpu || (isAgentOnline ? 'Não reportado pelo Agent' : offlineLabel),
@@ -332,7 +335,7 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     secure_boot: verifiedSecureBoot,
     xmp_profile: verifiedXmp,
     input_lag_ms: null,
-    ram_frequency: hardwareInv?.ram?.modules?.[0]?.speed_mhz ? `${hardwareInv.ram.modules[0].speed_mhz} MHz` : null,
+    ram_frequency: ramFreqFormatted,
     gpu_clock_mhz: null,
     cpu_clock_mhz: typeof hardwareInv?.cpu?.current_frequency_mhz === 'number' ? hardwareInv.cpu.current_frequency_mhz : null,
     cpu_power_w: null,

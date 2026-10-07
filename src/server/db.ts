@@ -122,17 +122,16 @@ function atomicWriteFile(targetPath: string, dataStr: string) {
   fs.renameSync(tmpPath, targetPath);
 }
 
-async function persistLocalDb() {
-  const release = await acquireWriteLock();
+function persistLocalDb() {
   try {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
     }
-    atomicWriteFile(DB_FILE, JSON.stringify(inMemoryDb, null, 2));
+    const tmpFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(inMemoryDb, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, DB_FILE);
   } catch (err) {
     console.warn('[LocalDb Persist Warning]:', err);
-  } finally {
-    release();
   }
 }
 

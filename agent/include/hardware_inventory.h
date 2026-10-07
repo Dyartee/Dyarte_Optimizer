@@ -159,6 +159,7 @@ public:
         std::string model = ReadRegistryString(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "ProcessorNameString");
         std::string vendor = ReadRegistryString(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "VendorIdentifier");
         DWORD mhz = ReadRegistryDword(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "~MHz", 0);
+        uint32_t maxMhz = 0;
 
         SYSTEM_INFO sysInfo;
         GetNativeSystemInfo(&sysInfo);
@@ -185,6 +186,28 @@ public:
             physicalCores = threads; // fallback if API call fails
         }
 
+        // Fallback e detecção de MaxClockSpeed via CIM
+        if (model.empty() || physicalCores == 0 || maxMhz == 0) {
+            std::string psCpu = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1 Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed | ForEach-Object { \\\"$($_.Name)|$($_.Manufacturer)|$($_.NumberOfCores)|$($_.NumberOfLogicalProcessors)|$($_.MaxClockSpeed)\\\" } } catch { }\"");
+            if (!psCpu.empty()) {
+                std::stringstream psSs(psCpu);
+                std::string part;
+                std::vector<std::string> parts;
+                while (std::getline(psSs, part, '|')) parts.push_back(Trim(part));
+                if (parts.size() >= 1 && model.empty()) model = parts[0];
+                if (parts.size() >= 2 && vendor.empty()) vendor = parts[1];
+                if (parts.size() >= 3 && physicalCores == threads) {
+                    try { physicalCores = std::stoul(parts[2]); } catch (...) {}
+                }
+                if (parts.size() >= 4 && threads == 0) {
+                    try { threads = std::stoul(parts[3]); } catch (...) {}
+                }
+                if (parts.size() >= 5) {
+                    try { maxMhz = std::stoul(parts[4]); } catch (...) {}
+                }
+            }
+        }
+
         std::string arch = "N/D";
         if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) arch = "x64";
         else if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) arch = "ARM64";
@@ -199,7 +222,7 @@ public:
            << "\"threads\":" << threads << ","
            << "\"architecture\":\"" << arch << "\","
            << "\"current_frequency_mhz\":" << (mhz > 0 ? std::to_string(mhz) : "null") << ","
-           << "\"max_frequency_mhz\":null"
+           << "\"max_frequency_mhz\":" << (maxMhz > 0 ? std::to_string(maxMhz) : (mhz > 0 ? std::to_string(mhz) : "null"))
            << "}";
 #else
         ss << "{"
@@ -371,8 +394,12 @@ public:
         uint64_t availMb = availBytes / (1024 * 1024);
 
         std::vector<std::string> moduleJsons;
-        // Query physical RAM sticks via CIM / PowerShell (Section 10: No WMIC)
-        std::string psOut = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | ForEach-Object { \\\"$($_.Capacity),$($_.DeviceLocator),$($_.Manufacturer),$($_.PartNumber),$($_.Speed),$($_.SerialNumber),$($_.MemoryType),$($_.FormFactor)\\\" } } catch { }\"");
+        uint32_t maxConfiguredSpeed = 0;
+        uint32_t maxBaseSpeed = 0;
+
+        // Query physical RAM sticks via CIM / PowerShell (Win32_PhysicalMemory)
+        // Coleta Capacity, DeviceLocator, Manufacturer, PartNumber, Speed, ConfiguredClockSpeed, SerialNumber, MemoryType, FormFactor
+        std::string psOut = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | ForEach-Object { \\\"$($_.Capacity)|$($_.DeviceLocator)|$($_.Manufacturer)|$($_.PartNumber)|$($_.Speed)|$($_.ConfiguredClockSpeed)|$($_.SerialNumber)|$($_.MemoryType)|$($_.FormFactor)\\\" } } catch { }\"");
         if (!psOut.empty()) {
             std::stringstream ssPs(psOut);
             std::string line;
@@ -382,7 +409,7 @@ public:
                 std::vector<std::string> parts;
                 std::stringstream ssLine(line);
                 std::string part;
-                while (std::getline(ssLine, part, ',')) {
+                while (std::getline(ssLine, part, '|')) {
                     parts.push_back(Trim(part));
                 }
                 if (parts.size() >= 5) {
@@ -391,20 +418,29 @@ public:
                     std::string mfg = parts[2];
                     std::string partNum = parts[3];
                     std::string speedStr = parts[4];
-                    std::string serial = parts.size() >= 6 ? parts[5] : "";
-                    std::string memType = parts.size() >= 7 ? parts[6] : "";
-                    std::string formFactor = parts.size() >= 8 ? parts[7] : "";
+                    std::string cfgSpeedStr = parts.size() >= 6 ? parts[5] : "";
+                    std::string serial = parts.size() >= 7 ? parts[6] : "";
+                    std::string memType = parts.size() >= 8 ? parts[7] : "";
+                    std::string formFactor = parts.size() >= 9 ? parts[8] : "";
 
                     uint64_t capBytes = 0;
                     try { capBytes = std::stoull(capStr); } catch (...) {}
                     uint64_t capGb = capBytes / (1024ULL * 1024ULL * 1024ULL);
                     uint64_t capMb = capBytes / (1024 * 1024);
 
-                    std::string speedJson = "null";
-                    try {
-                        uint32_t sp = std::stoul(speedStr);
-                        if (sp > 0) speedJson = std::to_string(sp);
-                    } catch (...) {}
+                    uint32_t baseSpeed = 0;
+                    try { baseSpeed = std::stoul(speedStr); } catch (...) {}
+                    if (baseSpeed > maxBaseSpeed) maxBaseSpeed = baseSpeed;
+
+                    uint32_t cfgSpeed = 0;
+                    try { cfgSpeed = std::stoul(cfgSpeedStr); } catch (...) {}
+                    if (cfgSpeed > maxConfiguredSpeed) maxConfiguredSpeed = cfgSpeed;
+
+                    uint32_t effectiveSpeed = cfgSpeed > 0 ? cfgSpeed : baseSpeed;
+
+                    std::string speedJson = effectiveSpeed > 0 ? std::to_string(effectiveSpeed) : "null";
+                    std::string cfgSpeedJson = cfgSpeed > 0 ? std::to_string(cfgSpeed) : "null";
+                    std::string baseSpeedJson = baseSpeed > 0 ? std::to_string(baseSpeed) : "null";
 
                     std::stringstream mss;
                     mss << "{"
@@ -417,6 +453,8 @@ public:
                         << "\"part_number\":\"" << Escape(partNum.empty() ? "N/D" : partNum) << "\","
                         << "\"serial_number\":\"" << Escape(serial.empty() ? "N/D" : serial) << "\","
                         << "\"speed_mhz\":" << speedJson << ","
+                        << "\"base_speed_mhz\":" << baseSpeedJson << ","
+                        << "\"configured_speed_mhz\":" << cfgSpeedJson << ","
                         << "\"memory_type\":\"" << Escape(memType.empty() ? "N/D" : memType) << "\","
                         << "\"form_factor\":\"" << Escape(formFactor.empty() ? "N/D" : formFactor) << "\""
                         << "}";
@@ -424,6 +462,9 @@ public:
                 }
             }
         }
+
+        uint32_t mainSpeed = maxConfiguredSpeed > 0 ? maxConfiguredSpeed : maxBaseSpeed;
+        std::string mainSpeedStr = mainSpeed > 0 ? std::to_string(mainSpeed) : "null";
 
         std::stringstream modSs;
         modSs << "[";
@@ -441,6 +482,10 @@ public:
            << "\"available_bytes\":" << availBytes << ","
            << "\"available_mb\":" << availMb << ","
            << "\"usage_percent\":" << loadPct << ","
+           << "\"speed_mhz\":" << mainSpeedStr << ","
+           << "\"frequency_mhz\":" << mainSpeedStr << ","
+           << "\"configured_clock_speed\":" << (maxConfiguredSpeed > 0 ? std::to_string(maxConfiguredSpeed) : "null") << ","
+           << "\"slots_used\":" << moduleJsons.size() << ","
            << "\"modules\":" << modSs.str()
            << "}";
 #else
@@ -452,6 +497,10 @@ public:
            << "\"available_bytes\":0,"
            << "\"available_mb\":0,"
            << "\"usage_percent\":0,"
+           << "\"speed_mhz\":null,"
+           << "\"frequency_mhz\":null,"
+           << "\"configured_clock_speed\":null,"
+           << "\"slots_used\":0,"
            << "\"modules\":[]"
            << "}";
 #endif
@@ -473,34 +522,64 @@ public:
             sysDrive = sysDir[0];
         }
 
-        ULARGE_INTEGER freeBytesCaller, totalBytes, totalFreeBytes;
-        char rootPath[4] = {sysDrive, ':', '\\', '\0'};
-        uint64_t total = 0, free = 0;
-        if (GetDiskFreeSpaceExA(rootPath, &freeBytesCaller, &totalBytes, &totalFreeBytes)) {
-            total = totalBytes.QuadPart;
-            free = totalFreeBytes.QuadPart;
+        std::vector<std::string> volumeJsons;
+        DWORD drivesMask = GetLogicalDrives();
+        for (char d = 'A'; d <= 'Z'; ++d) {
+            if (drivesMask & (1 << (d - 'A'))) {
+                char rootPath[4] = {d, ':', '\\', '\0'};
+                UINT driveType = GetDriveTypeA(rootPath);
+                if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
+                    ULARGE_INTEGER freeCaller, totalVol, totalFree;
+                    if (GetDiskFreeSpaceExA(rootPath, &freeCaller, &totalVol, &totalFree)) {
+                        uint64_t vTotal = totalVol.QuadPart;
+                        uint64_t vFree = totalFree.QuadPart;
+                        uint64_t vUsed = vTotal >= vFree ? (vTotal - vFree) : 0;
+                        uint64_t vTotalGb = vTotal / (1024ULL * 1024ULL * 1024ULL);
+                        uint64_t vFreeGb = vFree / (1024ULL * 1024ULL * 1024ULL);
+                        uint64_t vUsedGb = vUsed / (1024ULL * 1024ULL * 1024ULL);
+                        bool isSys = (std::toupper(static_cast<unsigned char>(d)) == std::toupper(static_cast<unsigned char>(sysDrive)));
+
+                        std::stringstream vss;
+                        vss << "{"
+                            << "\"drive\":\"" << d << ":\","
+                            << "\"total_bytes\":" << vTotal << ","
+                            << "\"free_bytes\":" << vFree << ","
+                            << "\"used_bytes\":" << vUsed << ","
+                            << "\"total_gb\":" << vTotalGb << ","
+                            << "\"free_gb\":" << vFreeGb << ","
+                            << "\"used_gb\":" << vUsedGb << ","
+                            << "\"is_system\":" << (isSys ? "true" : "false")
+                            << "}";
+                        volumeJsons.push_back(vss.str());
+                    }
+                }
+            }
         }
 
-        uint64_t used = total >= free ? (total - free) : 0;
-        uint64_t totalGb = total / (1024 * 1024 * 1024);
-        uint64_t freeGb = free / (1024 * 1024 * 1024);
-        uint64_t usedGb = used / (1024 * 1024 * 1024);
+        std::stringstream volSs;
+        volSs << "[";
+        for (size_t i = 0; i < volumeJsons.size(); ++i) {
+            if (i > 0) volSs << ",";
+            volSs << volumeJsons[i];
+        }
+        volSs << "]";
 
-        // Logical Volumes
-        std::string volumesJson = "[{"
-            "\"drive\":\"" + std::string(1, sysDrive) + ":\","
-            "\"total_bytes\":" + std::to_string(total) + ","
-            "\"free_bytes\":" + std::to_string(free) + ","
-            "\"used_bytes\":" + std::to_string(used) + ","
-            "\"total_gb\":" + std::to_string(totalGb) + ","
-            "\"free_gb\":" + std::to_string(freeGb) + ","
-            "\"used_gb\":" + std::to_string(usedGb) + ","
-            "\"is_system\":true"
-        "}]";
-
-        // Real Physical Disks: Query via Win32_DiskDrive and identify system drive accurately without WMIC (Section 9 & 10)
+        // Real Physical Disks: Query via Win32_DiskDrive e identificação de drive de sistema
         std::vector<std::string> physicalDisks;
-        std::string psDisks = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { $sysDrive = $env:SystemDrive; $sysDiskNum = -1; try { $p = Get-Partition -DriveLetter ($sysDrive.TrimEnd(':')) -ErrorAction SilentlyContinue; if ($p) { $sysDiskNum = $p.DiskNumber } } catch {}; Get-CimInstance Win32_DiskDrive -ErrorAction Stop | ForEach-Object { $dIndex = $_.Index; $isSys = if ($sysDiskNum -ge 0) { if ($dIndex -eq $sysDiskNum) { 'true' } else { 'false' } } else { 'null' }; \\\"$($_.DeviceID)|$($_.InterfaceType)|$($_.Manufacturer)|$($_.MediaType)|$($_.Model)|$($_.SerialNumber)|$($_.Size)|$($_.Status)|$isSys\\\" } } catch { }\"");
+        std::string psDisks = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { "
+            "$sysDrive = $env:SystemDrive; "
+            "$sysDiskNum = -1; "
+            "try { $p = Get-Partition -DriveLetter ($sysDrive.TrimEnd(':')) -ErrorAction SilentlyContinue; if ($p) { $sysDiskNum = $p.DiskNumber } } catch {}; "
+            "Get-CimInstance Win32_DiskDrive -ErrorAction Stop | ForEach-Object { "
+            "  $dIndex = $_.Index; "
+            "  $isSys = if ($sysDiskNum -ge 0) { if ($dIndex -eq $sysDiskNum) { 'true' } else { 'false' } } else { 'null' }; "
+            "  $media = $_.MediaType; "
+            "  if (-not $media -or $media -eq '') { "
+            "    try { $gd = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq [string]$dIndex } -ErrorAction SilentlyContinue; if ($gd) { $media = $gd.MediaType } } catch {} "
+            "  }; "
+            "  \\\"$($_.DeviceID)|$($_.InterfaceType)|$($_.Manufacturer)|$media|$($_.Model)|$($_.SerialNumber)|$($_.Size)|$($_.Status)|$isSys\\\" "
+            "} } catch { }\"");
+
         if (!psDisks.empty()) {
             std::stringstream ssDisks(psDisks);
             std::string line;
@@ -562,7 +641,7 @@ public:
 
         ss << "{"
            << "\"disks\":" << disksSs.str() << ","
-           << "\"volumes\":" << volumesJson
+           << "\"volumes\":" << volSs.str()
            << "}";
 #else
         ss << "{\"disks\":[],\"volumes\":[]}";
@@ -583,6 +662,20 @@ public:
 
         if (mfg.empty()) mfg = ReadRegistryString(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemManufacturer");
         if (product.empty()) product = ReadRegistryString(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemProductName");
+
+        // Fallback via CIM Win32_BaseBoard se chaves de registro estiverem em branco
+        if (product.empty() || mfg.empty()) {
+            std::string psMobo = ExecCommand("powershell.exe -NoProfile -NonInteractive -Command \"try { Get-CimInstance Win32_BaseBoard -ErrorAction Stop | ForEach-Object { \\\"$($_.Manufacturer)|$($_.Product)|$($_.Version)\\\" } } catch { }\"");
+            if (!psMobo.empty()) {
+                std::stringstream moboSs(psMobo);
+                std::string part;
+                std::vector<std::string> parts;
+                while (std::getline(moboSs, part, '|')) parts.push_back(Trim(part));
+                if (parts.size() >= 1 && mfg.empty()) mfg = parts[0];
+                if (parts.size() >= 2 && product.empty()) product = parts[1];
+                if (parts.size() >= 3 && version.empty()) version = parts[2];
+            }
+        }
 
         ss << "{"
            << "\"manufacturer\":\"" << Escape(mfg.empty() ? "N/D" : mfg) << "\","
@@ -747,10 +840,84 @@ public:
     /**
      * 19 & 20. GAMING FEATURES
      * Resizable BAR, XMP / EXPO.
-     * Uses null or N/D when not verified.
+     * Detecção real via WMI / CIM / Registry / SMBIOS sem valores fictícios.
      */
     static std::string detectGamingFeatures() {
-        return "{\"resizable_bar\":\"N/D\",\"xmp_expo\":\"N/D\"}";
+        std::string xmpExpo = "N/D";
+        std::string rebar = "N/D";
+
+#ifdef _WIN32
+        // 1. Detecção real de XMP / EXPO via velocidade configurada da RAM vs velocidade base SPD JEDEC
+        std::string xmpCmd = ExecCommand(
+            "powershell.exe -NoProfile -NonInteractive -Command \""
+            "try { "
+            "  $m = Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop; "
+            "  $detected = $false; "
+            "  $hasSticks = $false; "
+            "  foreach ($s in $m) { "
+            "    $hasSticks = $true; "
+            "    $cfg = [int]($s.ConfiguredClockSpeed); "
+            "    $spd = [int]($s.Speed); "
+            "    if ($cfg -gt $spd -or ($cfg -ge 3000 -and $spd -le 2666) -or ($cfg -ge 5600 -and $spd -le 4800)) { "
+            "      $detected = $true; "
+            "    } "
+            "  } "
+            "  if ($detected) { 'ENABLED' } elseif ($hasSticks) { 'DISABLED' } else { 'N/D' } "
+            "} catch { 'N/D' }\""
+        );
+        if (!xmpCmd.empty()) {
+            if (xmpCmd.find("ENABLED") != std::string::npos) xmpExpo = "ENABLED";
+            else if (xmpCmd.find("DISABLED") != std::string::npos) xmpExpo = "DISABLED";
+        }
+
+        // 2. Detecção real de Resizable BAR via Registro e adaptadores de vídeo
+        for (int i = 0; i < 16; ++i) {
+            char subKey[256];
+            snprintf(subKey, sizeof(subKey), "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\%04d", i);
+            bool foundRebar = false;
+            DWORD kmd = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "KMD_ReBarStatus", 0, &foundRebar);
+            if (foundRebar) {
+                rebar = (kmd == 1) ? "ENABLED" : "DISABLED";
+                break;
+            }
+            DWORD state = ReadRegistryDword(HKEY_LOCAL_MACHINE, subKey, "ReBarState", 0, &foundRebar);
+            if (foundRebar) {
+                rebar = (state == 1) ? "ENABLED" : "DISABLED";
+                break;
+            }
+        }
+
+        if (rebar == "N/D") {
+            std::string rebarCmd = ExecCommand(
+                "powershell.exe -NoProfile -NonInteractive -Command \""
+                "try { "
+                "  $gpus = Get-CimInstance Win32_VideoController -ErrorAction Stop; "
+                "  $hasLargeBar = $false; "
+                "  foreach ($g in $gpus) { "
+                "    if ($g.AdapterRAM -gt 1073741824) { "
+                "      $pnp = Get-PnpDevice -Class Display -Status OK -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $g.Name }; "
+                "      if ($pnp) { "
+                "        $dev = Get-ItemProperty -Path ('HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $pnp.DeviceID + '\\Device Parameters') -ErrorAction SilentlyContinue; "
+                "        if ($dev -and ($dev.ReBarState -eq 1 -or $dev.KMD_ReBarStatus -eq 1)) { $hasLargeBar = $true; } "
+                "      } "
+                "    } "
+                "  } "
+                "  if ($hasLargeBar) { 'ENABLED' } else { 'N/D' } "
+                "} catch { 'N/D' }\""
+            );
+            if (!rebarCmd.empty()) {
+                if (rebarCmd.find("ENABLED") != std::string::npos) rebar = "ENABLED";
+                else if (rebarCmd.find("DISABLED") != std::string::npos) rebar = "DISABLED";
+            }
+        }
+#endif
+
+        std::stringstream ss;
+        ss << "{"
+           << "\"resizable_bar\":\"" << Escape(rebar) << "\","
+           << "\"xmp_expo\":\"" << Escape(xmpExpo) << "\""
+           << "}";
+        return ss.str();
     }
 
     /**

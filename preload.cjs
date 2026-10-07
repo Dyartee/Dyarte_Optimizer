@@ -42,4 +42,15 @@ contextBridge.exposeInMainWorld('dyarte', {
     getVersion: () => ipcRenderer.invoke('app:get-version'),
     openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   },
+
+  // Agente Nativo Windows (dyarte-agent.exe)
+  agent: {
+    getStatus: () => ipcRenderer.invoke('agent:get-status'),
+    restart: () => ipcRenderer.invoke('agent:restart'),
+    onStatusChange: (callback) => {
+      const sub = (_event, data) => callback(data);
+      ipcRenderer.on('agent:status-changed', sub);
+      return () => ipcRenderer.removeListener('agent:status-changed', sub);
+    },
+  },
 });

@@ -431,6 +431,20 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 sbState = secJ.get("secure_boot").get_bool() ? 1 : 0;
             }
 
+            std::string storageSummary = "";
+            ULARGE_INTEGER freeBytesCaller, totalBytes, totalFreeBytes;
+            char sysDrive = 'C';
+            char sysDir[MAX_PATH];
+            if (GetSystemDirectoryA(sysDir, sizeof(sysDir)) > 0) {
+                sysDrive = sysDir[0];
+            }
+            char rootPath[4] = {sysDrive, ':', '\\', '\0'};
+            if (GetDiskFreeSpaceExA(rootPath, &freeBytesCaller, &totalBytes, &totalFreeBytes)) {
+                uint64_t totalGb = totalBytes.QuadPart / (1024ULL * 1024ULL * 1024ULL);
+                uint64_t freeGb = totalFreeBytes.QuadPart / (1024ULL * 1024ULL * 1024ULL);
+                storageSummary = std::string(1, sysDrive) + ": " + std::to_string(totalGb) + " GB (" + std::to_string(freeGb) + " GB livres)";
+            }
+
             std::string agentPubHex = AgentIdentity::GetPublicKeyHex();
             std::string response = ResponseBuilder::BuildStatusResult(
                 requestId,
@@ -442,7 +456,7 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 cpuName,
                 gpuName,
                 ramTotalStr,
-                "",
+                storageSummary,
                 moboName,
                 biosVer,
                 sbState,

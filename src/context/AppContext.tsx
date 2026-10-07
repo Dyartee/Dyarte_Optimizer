@@ -1779,6 +1779,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? 'Erro de conexão'
           : 'Desconectado',
       }));
+
+      // Assim que o agente nativo conectar com sucesso, dispara coleta real imediata de todo o hardware
+      if (isOnline) {
+        detectAndSetRealHardware(true);
+      }
     });
 
     const unsubTelemetry = agentBridge.onTelemetry((snapshot) => {
@@ -1811,12 +1816,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }));
     });
 
+    // Escutar eventos do processo principal Electron sobre o dyarte-agent.exe
+    let unsubElectronAgent: (() => void) | undefined;
+    if (typeof window !== 'undefined' && window.dyarte?.agent?.onStatusChange) {
+      unsubElectronAgent = window.dyarte.agent.onStatusChange((statusData: any) => {
+        console.log('[AppContext] Status do agente via Electron:', statusData);
+        if (statusData?.status === 'ONLINE') {
+          agentBridge.connect();
+          detectAndSetRealHardware(true);
+        }
+      });
+    }
+
     agentBridge.connect();
 
     return () => {
       console.log('[AppContext] cleanup chamado');
       unsub();
       unsubTelemetry();
+      if (unsubElectronAgent) unsubElectronAgent();
       // Não desconecta incondicionalmente no unmount de efeito do React StrictMode.
       // O agentBridge é um singleton estável de sessão da aplicação. Desconectar aqui abortaria
       // prematuramente o socket em andamento (CONNECTING) gerado pela montagem dupla do StrictMode.

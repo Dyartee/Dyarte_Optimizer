@@ -314,6 +314,11 @@ export interface DyarteElectronAPI {
     getVersion: () => Promise<string>;
     openExternal: (url: string) => Promise<void>;
   };
+  agent?: {
+    getStatus: () => Promise<any>;
+    restart: () => Promise<any>;
+    onStatusChange: (callback: (data: any) => void) => () => void;
+  };
 }
 
 declare global {

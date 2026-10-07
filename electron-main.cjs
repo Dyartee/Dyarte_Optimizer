@@ -87,6 +87,8 @@ const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 let mainWindow = null;
 let serverProcess = null;
 let agentProcess = null;
+let agentRestartTimer = null;
+let appIsQuitting = false;
 
 // User-Agent limpo para evitar bloqueio do Google OAuth (disallowed_useragent)
 const CHROME_USER_AGENT =
@@ -205,124 +207,19 @@ function startProductionServer() {
   }
 }
 
-let appIsQuitting = false;
-let agentRestartTimer = null;
-let currentAgentStatus = {
-  status: 'INITIALIZING',
-  host: '127.0.0.1',
-  port: 49152,
-  pid: null,
-  lastCheck: null,
-  error: null,
-};
-
 function scheduleAgentRestart(ms = 5000) {
-  if (appIsQuitting) {
-    return;
-  }
-  if (agentRestartTimer) {
-    clearTimeout(agentRestartTimer);
-    agentRestartTimer = null;
-  }
-  console.log(`[Electron] [Agent] Agendando reinício automático do agente em ${ms}ms...`);
-  notifyRendererAgentStatus('RESTARTING', {
-    error: `Reiniciando agente em ${ms / 1000}s...`,
-  });
+  if (agentRestartTimer || appIsQuitting) return;
   agentRestartTimer = setTimeout(() => {
     agentRestartTimer = null;
-    if (!appIsQuitting) {
-      startNativeAgent();
-    }
+    console.log('[Electron] [Agent] Tentando reiniciar o Windows Agent...');
+    startNativeAgent();
   }, ms);
 }
 
-function notifyRendererAgentStatus(status, details = {}) {
-  currentAgentStatus = {
-    ...currentAgentStatus,
-    status,
-    ...details,
-    lastCheck: new Date().toISOString(),
-  };
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-    try {
-      mainWindow.webContents.send('agent:status-changed', currentAgentStatus);
-      mainWindow.webContents.send('window:agent-status', currentAgentStatus);
-    } catch (e) {
-      // ignore
-    }
-  }
-}
-
-/**
- * Verifica se a porta 49152 está ouvindo localmente em 127.0.0.1
- */
-function checkAgentPortListening(host = '127.0.0.1', port = 49152, timeoutMs = 1500) {
-  const net = require('net');
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let settled = false;
-
-    socket.setTimeout(timeoutMs);
-
-    socket.on('connect', () => {
-      if (!settled) {
-        settled = true;
-        socket.destroy();
-        resolve(true);
-      }
-    });
-
-    socket.on('timeout', () => {
-      if (!settled) {
-        settled = true;
-        socket.destroy();
-        resolve(false);
-      }
-    });
-
-    socket.on('error', () => {
-      if (!settled) {
-        settled = true;
-        socket.destroy();
-        resolve(false);
-      }
-    });
-
-    try {
-      socket.connect(port, host);
-    } catch {
-      if (!settled) {
-        settled = true;
-        resolve(false);
-      }
-    }
-  });
-}
-
-/**
- * Inicia o Agente nativo do Windows (dyarte-agent.exe)
- * Escuta exclusivamente em 127.0.0.1:49152
- */
-async function startNativeAgent() {
+function startNativeAgent() {
+  if (appIsQuitting) return;
   const fs = require('fs');
   const isPackaged = app.isPackaged;
-
-  if (agentRestartTimer) {
-    clearTimeout(agentRestartTimer);
-    agentRestartTimer = null;
-  }
-
-  if (appIsQuitting) {
-    return;
-  }
-
-  // 1. Verificar se a porta já está ouvindo (ex: agente já em execução por outra instância)
-  const alreadyListening = await checkAgentPortListening('127.0.0.1', 49152, 1000);
-  if (alreadyListening) {
-    console.log('[Electron] [Agent] Agente ONLINE na porta 49152');
-    notifyRendererAgentStatus('ONLINE', { pid: agentProcess?.pid || 'external', port: 49152, error: null });
-    return;
-  }
 
   // Localização do executável do Agent
   // Em produção/instalador: resources/agent/dyarte-agent.exe
@@ -342,21 +239,14 @@ async function startNativeAgent() {
   }
 
   if (!agentExePath) {
-    console.error('[Electron] [Agent] [ERRO CRÍTICO] Binário dyarte-agent.exe NÃO encontrado nos caminhos padrão:');
-    possiblePaths.forEach((p) => console.error(`  -> Procurado em: ${p}`));
-    console.error('[Electron] [Agent] INSTRUÇÃO: Compile o agente executando "agent\\build.bat" ou "cmake -B build && cmake --build build --config Release", ou verifique se o executável dyarte-agent.exe foi instalado corretamente.');
-
-    notifyRendererAgentStatus('NOT_FOUND', {
-      error: 'Binário dyarte-agent.exe não encontrado. Compile com agent/build.bat ou instale o agente.',
-      paths: possiblePaths,
-    });
-
+    console.error('[Electron] [Agent] Binário dyarte-agent.exe não encontrado. Caminhos verificados: ' +
+      JSON.stringify(possiblePaths) + '. Compile com agent/build.bat ou instale o agente.');
+    sendAgentStatusToUi({ status: 'BINARY_MISSING', message: 'Agente não encontrado. Tentando novamente em 5s...' });
     scheduleAgentRestart(5000);
     return;
   }
 
   console.log('[Electron] [Agent] Localizado binário do Agent:', agentExePath);
-  notifyRendererAgentStatus('STARTING', { path: agentExePath, error: null });
 
   try {
     const workingDir = path.dirname(agentExePath);
@@ -377,10 +267,9 @@ async function startNativeAgent() {
     });
 
     agentProcess.on('exit', (code, signal) => {
-      console.warn(`[Electron] [Agent] Processo do Agent encerrado/caiu (código: ${code}, sinal: ${signal})`);
+      console.log(`[Electron] [Agent] Processo do Agent encerrado (código: ${code}, sinal: ${signal})`);
       agentProcess = null;
-      notifyRendererAgentStatus('OFFLINE', { exitCode: code, signal, error: `Encerrado com código ${code}` });
-
+      sendAgentStatusToUi({ status: 'EXITED', message: `Agente encerrado (código ${code})` });
       if (!appIsQuitting) {
         scheduleAgentRestart(5000);
       }
@@ -389,37 +278,65 @@ async function startNativeAgent() {
     agentProcess.on('error', (err) => {
       console.error('[Electron] [Agent] Falha ao disparar dyarte-agent.exe:', err.message);
       agentProcess = null;
-      notifyRendererAgentStatus('ERROR', { error: err.message });
       if (!appIsQuitting) {
         scheduleAgentRestart(5000);
       }
     });
 
-    // Validação da porta 49152 após inicialização
-    setTimeout(async () => {
-      if (!agentProcess || appIsQuitting) return;
-      let listening = false;
-      for (let attempt = 0; attempt < 6; attempt++) {
-        listening = await checkAgentPortListening('127.0.0.1', 49152, 1000);
-        if (listening) break;
-        await new Promise((r) => setTimeout(r, 600));
-      }
+    console.log(`[Electron] [Agent] dyarte-agent.exe disparado com sucesso (PID: ${agentProcess.pid || 'ativo'}).`);
 
-      if (listening) {
-        console.log(`[Electron] [Agent] Agente ONLINE na porta 49152 (PID: ${agentProcess.pid}).`);
-        notifyRendererAgentStatus('ONLINE', { pid: agentProcess.pid, port: 49152, error: null });
-      } else {
-        console.warn('[Electron] [Agent] Agente iniciado, aguardando bind da porta');
-        notifyRendererAgentStatus('CONNECTING', { pid: agentProcess.pid, port: 49152, error: 'Aguardando bind da porta' });
-      }
-    }, 1000);
+    // Verifica se a porta 49152 está escutando (com timeout curto)
+    setTimeout(() => {
+      checkAgentPortListening(1000).then((isListening) => {
+        if (isListening) {
+          console.log('[Electron] [Agent] Agente ONLINE na porta 127.0.0.1:49152.');
+          sendAgentStatusToUi({ status: 'ONLINE', message: 'Agente conectado' });
+        } else {
+          console.warn('[Electron] [Agent] Agente iniciado, mas porta 49152 ainda não está escutando.');
+          sendAgentStatusToUi({ status: 'STARTING', message: 'Agente iniciando...' });
+        }
+      });
+    }, 1500);
 
   } catch (err) {
     console.error('[Electron] [Agent] Erro ao iniciar dyarte-agent.exe:', err);
-    notifyRendererAgentStatus('ERROR', { error: err.message });
     if (!appIsQuitting) {
       scheduleAgentRestart(5000);
     }
+  }
+}
+
+function checkAgentPortListening(timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    const net = require('net');
+    const socket = new net.Socket();
+    let settled = false;
+    const done = (result) => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(result);
+      }
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+    socket.connect(49152, '127.0.0.1');
+  });
+}
+
+function sendAgentStatusToUi(payload) {
+  try {
+    const { status, message } = payload;
+    console.log(`[Electron] [Agent] Status -> status=${status}, message=${message}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agent:status', payload);
+      mainWindow.webContents.send('agent:status-changed', payload);
+      mainWindow.webContents.send('window:agent-status', payload);
+    }
+  } catch (err) {
+    // Ignorar falhas de notificação (janela pode não estar pronta)
   }
 }
 
@@ -446,7 +363,6 @@ function killAgentProcess() {
       // ignore
     }
     agentProcess = null;
-    notifyRendererAgentStatus('OFFLINE', { error: 'Processo encerrado' });
   }
 }
 
@@ -677,14 +593,24 @@ function setupIpcHandlers() {
 
   // Agente Nativo Windows
   ipcMain.handle('agent:get-status', () => {
-    return currentAgentStatus;
+    return {
+      hasBinary: (() => {
+        const fs = require('fs');
+        const paths = [
+          path.join(process.resourcesPath || '', 'agent', 'dyarte-agent.exe'),
+          path.join(__dirname, 'agent', 'build', 'Release', 'dyarte-agent.exe'),
+          path.join(__dirname, 'agent', 'dyarte-agent.exe'),
+        ];
+        return paths.some((p) => fs.existsSync(p));
+      })(),
+      processRunning: Boolean(agentProcess && !agentProcess.killed),
+    };
   });
 
-  ipcMain.handle('agent:restart', async () => {
+  ipcMain.handle('agent:restart', () => {
     killAgentProcess();
-    agentRetryCount = 0;
-    await startNativeAgent();
-    return currentAgentStatus;
+    startNativeAgent();
+    return { success: true };
   });
 }
 

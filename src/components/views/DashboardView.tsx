@@ -232,7 +232,7 @@ export const DashboardView: React.FC = () => {
               <span className="text-2xl font-extrabold text-white font-mono">
                 {device.cpu_usage_pct !== null ? `${device.cpu_usage_pct}%` : 'N/D'}
               </span>
-              <span className="text-xs text-zinc-300 font-mono truncate max-w-[120px]" title={device.cpu}>
+              <span className="text-xs text-zinc-300 font-mono truncate max-w-[160px]" title={device.cpu}>
                 {device.cpu || 'N/D'}
               </span>
             </div>
@@ -259,7 +259,7 @@ export const DashboardView: React.FC = () => {
               <span className="text-2xl font-extrabold text-white font-mono">
                 {device.gpu_usage_pct !== null ? `${device.gpu_usage_pct}%` : 'N/D'}
               </span>
-              <span className="text-xs text-zinc-300 font-mono truncate max-w-[120px]" title={device.gpu}>
+              <span className="text-xs text-zinc-300 font-mono truncate max-w-[160px]" title={device.gpu}>
                 {device.gpu || 'N/D'}
               </span>
             </div>
@@ -279,17 +279,15 @@ export const DashboardView: React.FC = () => {
                 <span>RAM</span>
               </div>
               <div className="flex items-center gap-1.5 flex-wrap">
-                {device.xmp_profile && (
-                  <span
-                    className={`text-[9px] font-mono px-1 py-0.5 rounded font-bold uppercase ${
-                      device.xmp_profile.includes('Ativo') || device.xmp_profile === 'ENABLED'
-                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-700/50'
-                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                    }`}
-                  >
-                    {device.xmp_profile}
-                  </span>
-                )}
+                <span
+                  className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold uppercase ${
+                    device.xmp_profile && (device.xmp_profile.includes('Ativo') || device.xmp_profile === 'ENABLED')
+                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-700/50'
+                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                  }`}
+                >
+                  {device.xmp_profile || 'XMP Desativado'}
+                </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-800/40">
                   {device.ram_frequency || 'N/D'}
                 </span>
@@ -299,7 +297,7 @@ export const DashboardView: React.FC = () => {
               <span className="text-2xl font-extrabold text-white font-mono">
                 {device.ram_usage_pct !== null ? `${device.ram_usage_pct}%` : 'N/D'}
               </span>
-              <span className="text-xs text-zinc-300 font-mono truncate max-w-[120px]" title={device.ram}>
+              <span className="text-xs text-zinc-300 font-mono truncate max-w-[160px]" title={device.ram}>
                 {device.ram || 'N/D'}
               </span>
             </div>
@@ -326,9 +324,11 @@ export const DashboardView: React.FC = () => {
               <span className="text-2xl font-extrabold text-white font-mono">
                 {device.storage_free_gb !== null && device.storage_total_gb
                   ? `${Math.round(((device.storage_total_gb - device.storage_free_gb) / device.storage_total_gb) * 100)}%`
+                  : device.storage_free_gb !== null
+                  ? `${device.storage_free_gb} GB`
                   : 'OK'}
               </span>
-              <span className="text-xs text-zinc-300 font-mono truncate max-w-[120px]" title={device.storage}>
+              <span className="text-xs text-zinc-300 font-mono truncate max-w-[160px]" title={device.storage}>
                 {device.storage || 'N/D'}
               </span>
             </div>

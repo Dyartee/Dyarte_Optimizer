@@ -123,6 +123,15 @@ export const PlanExecutionModal: React.FC = () => {
               </div>
             );
           })}
+
+          {isApply && (
+            <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-800/50 flex items-center gap-3 text-xs font-mono text-amber-300">
+              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0 animate-pulse" />
+              <span>
+                <strong>Reinicialização Recomendada:</strong> Reinicie o computador para que todas as diretivas de Timer Resolution, BCDEDIT e integridade do sistema tenham efeito pleno.
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

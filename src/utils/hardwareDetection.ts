@@ -177,18 +177,24 @@ export function detectRealScreen(): string {
  *
  * REGRA ABSOLUTA: NUNCA inferir modelo comercial de hardware via WebGL ou navigator.
  */
-export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Promise<DeviceInfo> {
+export async function detectFullComputerSpecs(
+  existingDevice?: DeviceInfo,
+  pingMsOverride?: number | null,
+  overrideInventory?: any
+): Promise<DeviceInfo> {
   // Teste de latência real com backend local (apenas se rota responder)
-  let pingMs: number | null = null;
-  try {
-    const start = performance.now();
-    const res = await fetch('/api/health', { method: 'GET', cache: 'no-store' });
-    if (res.ok) {
-      const end = performance.now();
-      pingMs = Math.max(1, Math.round(end - start));
+  let pingMs: number | null = pingMsOverride ?? null;
+  if (pingMs === null) {
+    try {
+      const start = performance.now();
+      const res = await fetch('/api/health', { method: 'GET', cache: 'no-store' });
+      if (res.ok) {
+        const end = performance.now();
+        pingMs = Math.max(1, Math.round(end - start));
+      }
+    } catch {
+      pingMs = null;
     }
-  } catch {
-    pingMs = null;
   }
 
   // Tentar detecção oficial de GPU via Electron IPC se disponível
@@ -207,19 +213,34 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   const isAgentOnline = agentBridge.getState() === 'AGENT_ONLINE';
 
   let agentStatus: any = agentBridge.getLatestStatus();
-  let hardwareInv: any = agentBridge.getLatestHardwareInventory();
+  let hardwareInv: any = overrideInventory || agentBridge.getLatestHardwareInventory();
+
+  if (typeof hardwareInv === 'string') {
+    try {
+      hardwareInv = JSON.parse(hardwareInv);
+    } catch {
+      hardwareInv = null;
+    }
+  }
 
   if (isAgentOnline) {
     try {
-      const results = await Promise.allSettled([
-        agentBridge.getStatus(5000),
-        agentBridge.getHardwareInventory(8000),
-      ]);
-      if (results[0].status === 'fulfilled' && results[0].value) {
-        agentStatus = results[0].value;
-      }
-      if (results[1].status === 'fulfilled' && results[1].value?.success && results[1].value?.inventory) {
-        hardwareInv = results[1].value.inventory;
+      // Se não temos inventário completo em cache, busca ativamente do agente
+      if (!hardwareInv || !hardwareInv.cpu) {
+        const results = await Promise.allSettled([
+          agentBridge.getStatus(3000),
+          agentBridge.getHardwareInventory(5000),
+        ]);
+        if (results[0].status === 'fulfilled' && results[0].value) {
+          agentStatus = results[0].value;
+        }
+        if (results[1].status === 'fulfilled' && results[1].value?.success && results[1].value?.inventory) {
+          let freshInv = results[1].value.inventory;
+          if (typeof freshInv === 'string') {
+            try { freshInv = JSON.parse(freshInv); } catch {}
+          }
+          hardwareInv = freshInv;
+        }
       }
     } catch {
       // Manter valores em cache se a requisição pontual falhar
@@ -261,6 +282,11 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     if (browserGpu && browserGpu !== 'N/D') {
       verifiedGpu = browserGpu;
     }
+  }
+
+  // Escopo estrito: somente AMD e NVIDIA. Excluir GPUs Intel
+  if (verifiedGpu && (verifiedGpu.toLowerCase().includes('intel') || verifiedGpu.toLowerCase().includes('arc'))) {
+    verifiedGpu = null;
   }
 
   // RAM REAL
@@ -306,8 +332,15 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
     const diskCap = primaryDisk.size_gb > 0 ? ` (${primaryDisk.size_gb} GB${diskType})` : '';
     storageTotalGb = primaryDisk.size_gb || null;
     verifiedStorage = `${diskModel}${diskCap}`.trim();
-  } else if (isAgentOnline && agentStatus?.storage && agentStatus.storage !== 'N/D') {
+  } else if (agentStatus?.storage && agentStatus.storage !== 'N/D') {
     verifiedStorage = agentStatus.storage;
+    if (storageFreeGb === null) {
+      const match = agentStatus.storage.match(/(\d+)\s*GB.*?\((\d+)\s*GB livres\)/i);
+      if (match) {
+        storageTotalGb = parseInt(match[1], 10);
+        storageFreeGb = parseInt(match[2], 10);
+      }
+    }
   } else if (existingDevice?.storage && existingDevice.storage !== 'N/D') {
     verifiedStorage = existingDevice.storage;
     storageFreeGb = existingDevice.storage_free_gb ?? null;
@@ -319,7 +352,10 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   if (hardwareInv?.motherboard?.product_name && hardwareInv.motherboard.product_name !== 'N/D') {
     const mfg = hardwareInv.motherboard.manufacturer && hardwareInv.motherboard.manufacturer !== 'N/D' ? `${hardwareInv.motherboard.manufacturer} ` : '';
     verifiedMobo = `${mfg}${hardwareInv.motherboard.product_name}`.trim();
-  } else if (isAgentOnline && agentStatus?.motherboard && agentStatus.motherboard !== 'N/D') {
+  } else if (hardwareInv?.motherboard?.model && hardwareInv.motherboard.model !== 'N/D') {
+    const mfg = hardwareInv.motherboard.manufacturer && hardwareInv.motherboard.manufacturer !== 'N/D' ? `${hardwareInv.motherboard.manufacturer} ` : '';
+    verifiedMobo = `${mfg}${hardwareInv.motherboard.model}`.trim();
+  } else if (agentStatus?.motherboard && agentStatus.motherboard !== 'N/D') {
     verifiedMobo = agentStatus.motherboard;
   } else if (existingDevice?.motherboard && existingDevice.motherboard !== 'N/D') {
     verifiedMobo = existingDevice.motherboard;
@@ -328,7 +364,7 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   // BIOS REAL
   const verifiedBios = hardwareInv?.bios?.version && hardwareInv.bios.version !== 'N/D'
     ? hardwareInv.bios.version
-    : (isAgentOnline && agentStatus?.bios_version && agentStatus.bios_version !== 'N/D'
+    : (agentStatus?.bios_version && agentStatus.bios_version !== 'N/D'
       ? agentStatus.bios_version
       : (existingDevice?.bios_version && existingDevice.bios_version !== 'N/D' ? existingDevice.bios_version : undefined));
 
@@ -336,7 +372,7 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   let verifiedSecureBoot: boolean | null = null;
   if (typeof hardwareInv?.security?.secure_boot === 'boolean') {
     verifiedSecureBoot = hardwareInv.security.secure_boot;
-  } else if (isAgentOnline && typeof agentStatus?.secure_boot === 'boolean') {
+  } else if (typeof agentStatus?.secure_boot === 'boolean') {
     verifiedSecureBoot = agentStatus.secure_boot;
   } else if (typeof existingDevice?.secure_boot === 'boolean') {
     verifiedSecureBoot = existingDevice.secure_boot;
@@ -356,12 +392,14 @@ export async function detectFullComputerSpecs(existingDevice?: DeviceInfo): Prom
   }
 
   // XMP / EXPO REAL
-  const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo || hardwareInv?.xmp_profile;
+  const xmpStatus = hardwareInv?.gaming?.xmp_expo || hardwareInv?.gaming_features?.xmp_expo || hardwareInv?.xmp_profile || (agentStatus as any)?.xmp_profile;
   let verifiedXmp: string | null = null;
   if (xmpStatus && xmpStatus !== 'UNKNOWN' && xmpStatus !== 'N/D') {
     verifiedXmp = xmpStatus === 'ENABLED' ? 'XMP Ativo' : (xmpStatus === 'DISABLED' ? 'XMP Desativado' : xmpStatus);
   } else if (existingDevice?.xmp_profile) {
     verifiedXmp = existingDevice.xmp_profile;
+  } else if (isAgentOnline) {
+    verifiedXmp = 'XMP Desativado';
   }
 
   // AGENT VERSION REAL (Requirement 21: Never hardcode '1.1.0')

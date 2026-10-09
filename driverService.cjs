@@ -192,39 +192,12 @@ async function executeDriverInstaller(vendor) {
     };
   }
 
-  // 1. Detectar GPU do sistema
+  // 1. Informar GPU do sistema (sem bloquear caso não haja driver de vídeo instalado)
   const gpuDetection = detectGpuVendor();
   const detectedVendor = gpuDetection.vendor;
-
   console.log(`[DriverService] Hardware detectado: ${detectedVendor} (${gpuDetection.rawOutput})`);
 
-  // Se não puder identificar o fabricante
-  if (detectedVendor === 'UNKNOWN') {
-    const msg = 'A GPU deste computador não pôde ser identificada com segurança pelo subsistema do Windows. Por precaução de integridade do sistema operacional, nenhum instalador de driver foi executado.';
-    console.error('[DriverService] Falha de segurança:', msg);
-    return {
-      success: false,
-      phase: 'failed',
-      error: msg,
-      detectedVendor: 'UNKNOWN',
-      gpuDetails: gpuDetection.rawOutput,
-    };
-  }
-
-  // 2. Verificar correspondência entre o driver clicado e o hardware real
-  if (detectedVendor !== vendor) {
-    const msg = `Este driver (${vendor}) não corresponde à GPU detectada neste computador (${detectedVendor}: ${gpuDetection.rawOutput}). Operação bloqueada para evitar conflito de kernel no Windows.`;
-    console.error('[DriverService] Incompatibilidade de hardware:', msg);
-    return {
-      success: false,
-      phase: 'failed',
-      error: msg,
-      detectedVendor,
-      gpuDetails: gpuDetection.rawOutput,
-    };
-  }
-
-  // 3. Localizar instalador compatível na pasta
+  // 2. Localizar instalador oficial Setup.exe na pasta drivers/AMD ou drivers/NVIDIA
   const installerResult = findDriverInstaller(vendor);
   if (!installerResult.found) {
     console.error('[DriverService] Instalador não encontrado:', installerResult.error);

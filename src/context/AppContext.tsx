@@ -225,8 +225,18 @@ interface AppContextType {
   // 4 Plan Buttons & Execution Status Modal
   planExecutionModal: PlanExecutionModalState;
   closePlanExecutionModal: () => void;
-  applyPlanOptimizations: (planLevel: PlanLevel, planName?: string) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
-  rollbackPlanOptimizations: (planLevel: PlanLevel, planName?: string) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
+  applyPlanOptimizations: (
+    planLevel: PlanLevel,
+    planName?: string,
+    selectedToolIds?: string[],
+    onProgress?: (current: number, total: number) => void
+  ) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
+  rollbackPlanOptimizations: (
+    planLevel: PlanLevel,
+    planName?: string,
+    selectedToolIds?: string[],
+    onProgress?: (current: number, total: number) => void
+  ) => Promise<{ success: boolean; results: PlanExecutionItem[] }>;
   downloadDriverForVendor: (vendor?: 'AMD' | 'NVIDIA' | 'Intel') => Promise<void>;
   installDriverForVendor: (vendor?: 'AMD' | 'NVIDIA' | 'Intel') => Promise<void>;
 }
@@ -829,61 +839,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       gpuNames = device?.gpu || 'Desconhecido';
     }
 
+    // REMOVER A VERIFICAÇÃO BLOQUEANTE DA PROVEDORA DA PLACA DE VÍDEO
+    // Em casos de PC sem driver de vídeo instalado, o app deve permitir aplicar normalmente
     if (detectedVendor === 'UNKNOWN') {
-      const errorMsg =
-        'A GPU deste computador não pôde ser identificada com segurança. Nenhum instalador foi executado automaticamente.';
-      setDriverPipeline((prev) =>
-        prev
-          ? {
-              ...prev,
-              phase: 'failed',
-              progress: 100,
-              actionText: 'Falha: GPU não identificada com segurança.',
-              errorMessage: errorMsg,
-              logs: [
-                ...prev.logs,
-                `[ALERTA] Hardware gráfico não identificado no barramento PCI do Windows.`,
-                `[BLOQUEIO] Operação cancelada preventivamente para proteger a estabilidade do sistema.`,
-              ],
-            }
-          : null
-      );
-      addToast('error', 'GPU não Identificada', errorMsg);
-      return {
-        status: 'FAILED',
-        code: 'GPU_UNKNOWN',
-        success: false,
-        message: errorMsg,
-      };
-    }
-
-    if (detectedVendor !== brand) {
-      const errorMsg = `Este driver (${brand}) não corresponde à GPU detectada no computador (${detectedVendor}: ${gpuNames}). Operação bloqueada por segurança para evitar incompatibilidade.`;
-      setDriverPipeline((prev) =>
-        prev
-          ? {
-              ...prev,
-              phase: 'failed',
-              progress: 100,
-              actionText: `Incompatibilidade: GPU detectada é ${detectedVendor}.`,
-              errorMessage: errorMsg,
-              detectedVendor,
-              logs: [
-                ...prev.logs,
-                `[DETECÇÃO] GPU Ativa identificada: ${detectedVendor} (${gpuNames}).`,
-                `[BLOQUEIO] Tentativa de instalar driver ${brand} em hardware ${detectedVendor}.`,
-                `[SEGURANÇA] Instalação interrompida por proteção contra incompatibilidade.`,
-              ],
-            }
-          : null
-      );
-      addToast('warning', 'Driver Incompatível', errorMsg);
-      return {
-        status: 'FAILED',
-        code: 'GPU_INCOMPATIBLE',
-        success: false,
-        message: errorMsg,
-      };
+      console.log(`[AppContext] Hardware gráfico sem driver nativo identificado. Prosseguindo com o instalador de ${brand}.`);
+    } else if (detectedVendor !== brand) {
+      console.log(`[AppContext] Instalando driver para ${brand} (GPU detectada: ${detectedVendor}).`);
     }
 
     if (!window.dyarte?.drivers) {
@@ -1862,7 +1823,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const unsubHw = agentBridge.onHardwareInventory((inv) => {
       console.log('[AppContext] Inventário recebido do agente:', inv);
-      detectAndSetRealHardware(true);
+      detectAndSetRealHardware(true, inv);
     });
 
     const unsubStatus = agentBridge.onStatus((statusData) => {
@@ -1945,10 +1906,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast('info', 'Status de Telemetria', 'Latência de rede e status da conexão com o backend verificados.');
   };
 
-  const detectAndSetRealHardware = async (silent = false) => {
+  const detectAndSetRealHardware = async (silent = false, overrideInventory?: any) => {
     setIsHardwareDetecting(true);
     try {
-      const realDevice = await detectFullComputerSpecs(device);
+      const realDevice = await detectFullComputerSpecs(device, null, overrideInventory);
       setDevice(realDevice);
       localStorage.setItem('dyarte_device', JSON.stringify(realDevice));
 
@@ -2160,15 +2121,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsOptimizing(true);
     setActiveOptimizingToolId(toolId);
 
-    // If it's AMD or NVIDIA driver tools, trigger driver pipeline
-    if (toolId === 'tool_gpu_amd_driver' || toolId === 'tool_gpu_amd_opt') {
+    // If it's AMD or NVIDIA driver installer tools, trigger driver pipeline (Setup.exe)
+    if (toolId === 'tool_gpu_amd_driver') {
       const pipeRes = await executeDriverPipeline('AMD');
       setIsOptimizing(false);
       setActiveOptimizingToolId(null);
       return { success: false, message: pipeRes.message };
     }
 
-    if (toolId === 'tool_gpu_nvidia_driver' || toolId === 'tool_gpu_nvidia_opt') {
+    if (toolId === 'tool_gpu_nvidia_driver') {
       const pipeRes = await executeDriverPipeline('NVIDIA');
       setIsOptimizing(false);
       setActiveOptimizingToolId(null);
@@ -2554,17 +2515,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const applyPlanOptimizations = async (
     planLevel: PlanLevel,
-    planName?: string
+    planName?: string,
+    selectedToolIds?: string[],
+    onProgress?: (current: number, total: number) => void
   ): Promise<{ success: boolean; results: PlanExecutionItem[] }> => {
     const targetName = planName || getPlanNameByLevel(planLevel);
     setIsOptimizing(true);
     addToast('info', `Iniciando Otimizações: ${targetName}`, `Aplicando rotinas do plano nível ${planLevel}...`);
 
-    const eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel);
+    let eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel);
+    if (Array.isArray(selectedToolIds) && selectedToolIds.length > 0) {
+      eligibleTools = eligibleTools.filter((t) => selectedToolIds.includes(t.tool_id));
+    }
     const items: PlanExecutionItem[] = [];
     let successCount = 0;
+    const totalCount = eligibleTools.length;
 
-    for (const t of eligibleTools) {
+    for (let i = 0; i < totalCount; i++) {
+      const t = eligibleTools[i];
+      if (onProgress) onProgress(i + 1, totalCount);
       setActiveOptimizingToolId(t.tool_id);
       const startTime = Date.now();
       try {
@@ -2647,17 +2616,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const rollbackPlanOptimizations = async (
     planLevel: PlanLevel,
-    planName?: string
+    planName?: string,
+    selectedToolIds?: string[],
+    onProgress?: (current: number, total: number) => void
   ): Promise<{ success: boolean; results: PlanExecutionItem[] }> => {
     const targetName = planName || getPlanNameByLevel(planLevel);
     setIsOptimizing(true);
     addToast('info', `Revertendo Otimizações: ${targetName}`, `Restaurando configurações padrão do Windows para nível ${planLevel}...`);
 
-    const eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel && t.is_reversible);
+    let eligibleTools = tools.filter((t) => t.required_plan_level <= planLevel && t.is_reversible);
+    if (Array.isArray(selectedToolIds) && selectedToolIds.length > 0) {
+      eligibleTools = eligibleTools.filter((t) => selectedToolIds.includes(t.tool_id) && t.is_reversible);
+    }
     const items: PlanExecutionItem[] = [];
     let successCount = 0;
+    const totalCount = eligibleTools.length;
 
-    for (const t of eligibleTools) {
+    for (let i = 0; i < totalCount; i++) {
+      const t = eligibleTools[i];
+      if (onProgress) onProgress(i + 1, totalCount);
       setActiveOptimizingToolId(t.tool_id);
       const startTime = Date.now();
       try {

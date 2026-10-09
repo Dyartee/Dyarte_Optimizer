@@ -612,6 +612,19 @@ function setupIpcHandlers() {
     startNativeAgent();
     return { success: true };
   });
+
+  // Privilégios de Administrador
+  ipcMain.handle('admin:is-admin', () => {
+    return checkIsAdmin();
+  });
+
+  ipcMain.handle('admin:request-elevation', () => {
+    if (checkIsAdmin()) {
+      return { success: true, alreadyAdmin: true };
+    }
+    const ok = relaunchAsAdmin();
+    return { success: ok, alreadyAdmin: false };
+  });
 }
 
 /**
@@ -637,11 +650,56 @@ function killServerProcess() {
   }
 }
 
+/**
+ * Verifica se o processo atual do Electron já possui privilégios de Administrador no Windows.
+ */
+function checkIsAdmin() {
+  if (process.platform !== 'win32') return true;
+  try {
+    const { execSync } = require('child_process');
+    execSync('net session', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Relança o processo com elevação de Administrador (UAC) usando PowerShell Start-Process -Verb RunAs.
+ */
+function relaunchAsAdmin() {
+  if (process.platform !== 'win32') return false;
+  console.log('[Electron] [UAC] Requisitando elevação de Administrador do Windows...');
+  const { spawn } = require('child_process');
+  const exe = process.execPath;
+  const args = process.argv.slice(1);
+  const argsString = args.map((a) => `"${a.replace(/"/g, '`"')}"`).join(' ');
+  const psCmd = `Start-Process -FilePath "${exe}" -ArgumentList '${argsString}' -Verb RunAs`;
+  try {
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    app.quit();
+    return true;
+  } catch (e) {
+    console.error('[Electron] [UAC] Falha ao solicitar elevação:', e);
+    return false;
+  }
+}
+
 // -------------------------------------------------------------
 // CICLO DE VIDA DO APLICATIVO ELECTRON
 // -------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  // PROBLEMA 2: Exigir privilégios de Administrador ao iniciar no Windows
+  if (process.platform === 'win32' && !checkIsAdmin()) {
+    console.warn('[Electron] Processo sem privilégios de Administrador. Disparando UAC para relançar...');
+    const relaunched = relaunchAsAdmin();
+    if (relaunched) return;
+  }
   // Registra User-Agent global para sessões (elimina o disallowed_useragent do Google Login)
   session.defaultSession.setUserAgent(CHROME_USER_AGENT);
 

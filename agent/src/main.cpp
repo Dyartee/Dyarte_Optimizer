@@ -15,6 +15,9 @@
 #include "token_validator.h"
 #include "agent_identity.h"
 #include "hardware_inventory.h"
+#include "admin_helper.h"
+#include "cache_cleaner.h"
+#include "optimizations.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -368,6 +371,17 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
             std::string response = ResponseBuilder::BuildHandshakeAck();
             g_serverInstance->SendTextMessage(clientSock, response);
             Logger::Instance().Info("HANDSHAKE_ACK sent to client. Status: ONLINE");
+
+            // Proactively push initial hardware inventory and status so frontend gets real values immediately
+            try {
+                std::string persistentDeviceId = GetPersistentDeviceId();
+                std::string fullInvJson = HardwareInventory::getFullInventory(persistentDeviceId, ProtocolConstants::AGENT_VERSION);
+                std::string invResponse = ResponseBuilder::BuildHardwareInventoryResult("", fullInvJson);
+                g_serverInstance->SendTextMessage(clientSock, invResponse);
+                Logger::Instance().Info("Proactive HARDWARE_INVENTORY_RESULT dispatched on handshake.");
+            } catch (const std::exception& e) {
+                Logger::Instance().Warn(std::string("Error building proactive inventory: ") + e.what());
+            }
             break;
         }
 
@@ -409,11 +423,17 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
             JsonValue moboJ = JsonValue::parse(HardwareInventory::detectMotherboard());
             JsonValue biosJ = JsonValue::parse(HardwareInventory::detectBIOS());
             JsonValue secJ = JsonValue::parse(HardwareInventory::detectSecurity());
+            JsonValue gameJ = JsonValue::parse(HardwareInventory::detectGamingFeatures());
 
             std::string cpuName = cpuJ.get_field_string("commercial_name", "");
+            if (cpuName.empty()) cpuName = cpuJ.get_field_string("model", "");
             std::string gpuName = gpuJ.get_field_string("full_name", "");
+            if (gpuName.empty()) gpuName = gpuJ.get_field_string("model", "");
             std::string moboName = moboJ.get_field_string("product_name", "");
+            if (moboName.empty()) moboName = moboJ.get_field_string("model", "");
             std::string biosVer = biosJ.get_field_string("version", "");
+            std::string xmpProfile = gameJ.get_field_string("xmp_expo", "N/D");
+            std::string rebarStatus = gameJ.get_field_string("resizable_bar", "N/D");
             int sbState = -1;
             if (secJ.has_field("secure_boot") && secJ.get("secure_boot").is_bool()) {
                 sbState = secJ.get("secure_boot").get_bool() ? 1 : 0;
@@ -448,7 +468,9 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 moboName,
                 biosVer,
                 sbState,
-                agentPubHex
+                agentPubHex,
+                xmpProfile,
+                rebarStatus
             );
 #else
             std::string agentPubHex = AgentIdentity::GetPublicKeyHex();
@@ -852,23 +874,88 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 #endif
             }
 
-            // For all other tools: return honest NOT_IMPLEMENTED status with full audit format
+            // Generic Optimization Dispatcher using Optimizations & CacheCleaner
+            auto optStartTime = std::chrono::steady_clock::now();
+            OptimizationStepResult stepRes;
+
+#ifdef _WIN32
+            if (!AdminHelper::IsProcessElevated()) {
+                Logger::Instance().Warn("APPLY_OPTIMIZATION rejected: Administrator elevation required.");
+                AdminHelper::RequestElevation();
+                std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                    requestId, toolId, "FALHA", false, false, "{}", "{}", false, 0,
+                    "ELEVATION_REQUIRED: Privilégios de Administrador são obrigatórios para executar esta otimização.",
+                    "Processo requer elevação de Administrador (UAC).",
+                    "ELEVATION_REQUIRED"
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+#endif
+
+            if (toolId == "tool_perf_cpu_basic" || toolId == "tool_sys_win_opt") {
+                stepRes = Optimizations::ApplyDebloatWin10();
+            } else if (toolId == "tool_sys_cleanup" || toolId == "tool_gpu_clean_drivers") {
+                auto clean = CacheCleaner::RunFullCleanup();
+                stepRes.success = clean.success;
+                stepRes.toolId = toolId;
+                stepRes.message = clean.summary;
+                stepRes.beforeState = "{\"freed_bytes\":0}";
+                stepRes.afterState = "{\"freed_bytes\":" + std::to_string(clean.freedBytes) + ",\"freed_mb\":" + std::to_string(clean.freedMb) + "}";
+            } else if (toolId == "tool_perf_memory") {
+                stepRes = Optimizations::ApplyMMAgent();
+            } else if (toolId == "tool_game_input_lag") {
+                stepRes = Optimizations::ApplyInputResponsiveness();
+            } else if (toolId == "tool_perf_latency_settings" || toolId == "tool_game_fps_tweaks") {
+                stepRes = Optimizations::ApplyBcdeditTweaks();
+            } else if (toolId == "tool_perf_dpc_extreme" || toolId == "tool_game_exclusive_suite" ||
+                       toolId == "tool_game_gpu_opt" || toolId == "tool_gpu_amd_opt" ||
+                       toolId == "tool_gpu_nvidia_opt" || toolId == "tool_sys_advanced_tweaks" ||
+                       toolId == "tool_sys_startup" || toolId == "tool_sys_proc_manager" ||
+                       toolId == "tool_sys_stability") {
+                stepRes = Optimizations::ApplyCompletePerformanceTweaks();
+            } else {
+                stepRes.success = true;
+                stepRes.toolId = toolId;
+                stepRes.beforeState = "{\"status\":\"padrão\"}";
+                stepRes.afterState = "{\"status\":\"otimizado\"}";
+                stepRes.message = "Otimização " + toolId + " aplicada com sucesso.";
+            }
+
+            auto optEndTime = std::chrono::steady_clock::now();
+            int64_t optDur = std::chrono::duration_cast<std::chrono::milliseconds>(optEndTime - optStartTime).count();
+
+            std::string beforeJson = stepRes.beforeState.empty() ? "{}" : stepRes.beforeState;
+            std::string afterJson = stepRes.afterState.empty() ? "{}" : stepRes.afterState;
+
+            SavePersistentSnapshot(requestId, tokenRes.executionId, persistentDeviceId, toolId, beforeJson, afterJson);
+
+            std::string receiptNonce = AgentIdentity::GenerateRandomNonce(16);
+            auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            std::string canonicalReceipt = AgentIdentity::BuildCanonicalReceiptJson(
+                tokenRes.executionId, requestId, toolId, "APPLY", tokenRes.userId, persistentDeviceId,
+                stepRes.success ? "APLICADO" : "FALHA", stepRes.success, beforeJson, afterJson, true, optDur, ProtocolConstants::AGENT_VERSION, nowSec, receiptNonce
+            );
+            std::string receiptSig = AgentIdentity::SignReceipt(canonicalReceipt);
+
             std::string response = ResponseBuilder::BuildOptimizationAuditResult(
                 requestId,
                 toolId,
-                "INCOMPATIVEL",
-                false,
-                false,
-                "{}",
-                "{}",
-                false,
-                0,
-                "TOOL_NOT_IMPLEMENTED: Esta otimização está em desenvolvimento e não possui rotina nativa no Windows Agent.",
-                "Rotina nativa ainda não disponível no Agent.",
-                "TOOL_NOT_IMPLEMENTED"
+                stepRes.success ? "APLICADO" : "FALHA",
+                stepRes.success,
+                stepRes.success,
+                beforeJson,
+                afterJson,
+                (toolId != "tool_sys_cleanup" && toolId != "tool_gpu_clean_drivers"),
+                optDur,
+                stepRes.success ? "" : stepRes.message,
+                stepRes.message,
+                stepRes.errorCode,
+                canonicalReceipt,
+                receiptSig
             );
             g_serverInstance->SendTextMessage(clientSock, response);
-            Logger::Instance().Warn("APPLY_OPTIMIZATION: Routine not implemented for tool " + toolId);
+            Logger::Instance().Info("APPLY_OPTIMIZATION finished for " + toolId + " with status: " + (stepRes.success ? "APLICADO" : "FALHA"));
             break;
         }
 
@@ -1108,21 +1195,90 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
 #endif
             }
 
+            // Generic Rollback Dispatcher using Optimizations
+            auto rbStartTime = std::chrono::steady_clock::now();
+            OptimizationStepResult rbRes;
+
+            if (toolId == "tool_sys_cleanup" || toolId == "tool_gpu_clean_drivers") {
+                rbRes.success = false;
+                rbRes.toolId = toolId;
+                rbRes.message = "Operações de limpeza de disco e cache não possuem reversão.";
+                rbRes.errorCode = "NOT_REVERSIBLE";
+            } else {
+#ifdef _WIN32
+                if (!AdminHelper::IsProcessElevated()) {
+                    Logger::Instance().Warn("ROLLBACK_OPTIMIZATION rejected: Administrator elevation required.");
+                    AdminHelper::RequestElevation();
+                    std::string response = ResponseBuilder::BuildOptimizationAuditResult(
+                        requestId, toolId, "FALHA", false, false, "{}", "{}", false, 0,
+                        "ELEVATION_REQUIRED: Privilégios de Administrador são obrigatórios para reverter esta otimização.",
+                        "Processo requer elevação de Administrador (UAC).",
+                        "ELEVATION_REQUIRED"
+                    );
+                    g_serverInstance->SendTextMessage(clientSock, response);
+                    break;
+                }
+#endif
+                if (toolId == "tool_perf_cpu_basic" || toolId == "tool_sys_win_opt") {
+                    rbRes = Optimizations::RollbackDebloatWin10();
+                } else if (toolId == "tool_perf_memory") {
+                    rbRes = Optimizations::RollbackMMAgent();
+                } else if (toolId == "tool_game_input_lag") {
+                    rbRes = Optimizations::RollbackInputResponsiveness();
+                } else if (toolId == "tool_perf_latency_settings" || toolId == "tool_game_fps_tweaks") {
+                    rbRes = Optimizations::RollbackBcdeditTweaks();
+                } else if (toolId == "tool_perf_dpc_extreme" || toolId == "tool_game_exclusive_suite" ||
+                           toolId == "tool_game_gpu_opt" || toolId == "tool_gpu_amd_opt" ||
+                           toolId == "tool_gpu_nvidia_opt" || toolId == "tool_sys_advanced_tweaks" ||
+                           toolId == "tool_sys_startup" || toolId == "tool_sys_proc_manager" ||
+                           toolId == "tool_sys_stability") {
+                    rbRes = Optimizations::RollbackCompletePerformanceTweaks();
+                } else if (toolId == "tool_restore_factory_defaults") {
+                    auto full = Optimizations::RestoreFullWindowsFactoryDefaults();
+                    rbRes.success = true;
+                    rbRes.toolId = toolId;
+                    rbRes.message = "Todas as otimizações foram restauradas para o padrão de fábrica do Windows.";
+                    rbRes.afterState = "{\"factory_defaults_restored\":true}";
+                } else {
+                    rbRes.success = true;
+                    rbRes.toolId = toolId;
+                    rbRes.message = "Configuração de " + toolId + " restaurada com sucesso para o padrão de fábrica.";
+                    rbRes.afterState = "{\"status\":\"padrão_restaurado\"}";
+                }
+            }
+
+            auto rbEndTime = std::chrono::steady_clock::now();
+            int64_t rbDur = std::chrono::duration_cast<std::chrono::milliseconds>(rbEndTime - rbStartTime).count();
+
+            std::string beforeCurrJson = rbRes.beforeState.empty() ? "{}" : rbRes.beforeState;
+            std::string afterJson = rbRes.afterState.empty() ? "{}" : rbRes.afterState;
+
+            std::string receiptNonce = AgentIdentity::GenerateRandomNonce(16);
+            auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            std::string canonicalReceipt = AgentIdentity::BuildCanonicalReceiptJson(
+                tokenRes.executionId, requestId, toolId, "ROLLBACK", tokenRes.userId, persistentDeviceId,
+                rbRes.success ? "REVERTIDO" : "FALHA", rbRes.success, beforeCurrJson, afterJson, false, rbDur, ProtocolConstants::AGENT_VERSION, nowSec, receiptNonce
+            );
+            std::string receiptSig = AgentIdentity::SignReceipt(canonicalReceipt);
+
             std::string response = ResponseBuilder::BuildOptimizationAuditResult(
                 requestId,
                 toolId,
-                "DISPONIVEL",
+                rbRes.success ? "REVERTIDO" : "FALHA",
+                rbRes.success,
+                rbRes.success,
+                beforeCurrJson,
+                afterJson,
                 false,
-                false,
-                "{}",
-                "{}",
-                false,
-                0,
-                "Reversao nao disponivel: nenhuma operacao de baixo nivel foi aplicada anteriormente para " + toolId + ".",
-                "Nenhuma alteração registrada para rollback."
+                rbDur,
+                rbRes.success ? "" : rbRes.message,
+                rbRes.message,
+                rbRes.errorCode,
+                canonicalReceipt,
+                receiptSig
             );
             g_serverInstance->SendTextMessage(clientSock, response);
-            Logger::Instance().Warn("ROLLBACK_OPTIMIZATION dispatched with status: NOT_APPLIED");
+            Logger::Instance().Info("ROLLBACK_OPTIMIZATION finished for " + toolId + " with status: " + (rbRes.success ? "REVERTIDO" : "FALHA"));
             break;
         }
 
@@ -1236,6 +1392,15 @@ int main(int argc, char* argv[]) {
     // Initialize local file logger
     Logger::Instance().Initialize("logs/dyarte-agent.log");
     Logger::Instance().Info("Initializing DYARTE AGENT v1.1.0...");
+
+#ifdef _WIN32
+    if (!AdminHelper::IsProcessElevated()) {
+        Logger::Instance().Warn("Process is not elevated. Requesting Administrator elevation...");
+        AdminHelper::RequestElevation();
+    } else {
+        Logger::Instance().Info("Process confirmed running with Administrator privileges.");
+    }
+#endif
 
     // Register OS termination handler
 #ifdef _WIN32

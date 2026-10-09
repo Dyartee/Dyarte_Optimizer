@@ -279,7 +279,7 @@ public:
             std::string name = ReadRegistryString(HKEY_LOCAL_MACHINE, subKey, "DriverDesc");
             if (name.empty()) continue;
 
-            // Filter out virtual display adapters
+            // Filter out virtual display adapters and Intel GPUs (scope is strictly AMD and NVIDIA)
             std::string lower = name;
             std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
             if (lower.find("virtual") != std::string::npos ||
@@ -289,6 +289,8 @@ public:
                 lower.find("remote") != std::string::npos ||
                 lower.find("vmware") != std::string::npos ||
                 lower.find("parallels") != std::string::npos ||
+                lower.find("intel") != std::string::npos ||
+                lower.find("arc") != std::string::npos ||
                 lower.find("iddsample") != std::string::npos) {
                 continue;
             }
@@ -312,8 +314,6 @@ public:
                 item.vendor = "NVIDIA";
             } else if (lower.find("amd") != std::string::npos || lower.find("radeon") != std::string::npos) {
                 item.vendor = "AMD";
-            } else if (lower.find("intel") != std::string::npos || lower.find("arc") != std::string::npos) {
-                item.vendor = "Intel";
             }
 
             // Real Primary GPU detection via EnumDisplayDevicesA (Section 11)

@@ -206,7 +206,9 @@ public:
         const std::string& motherboard = "",
         const std::string& biosVersion = "",
         int secureBootState = -1,
-        const std::string& agentPublicKey = ""
+        const std::string& agentPublicKey = "",
+        const std::string& xmpProfile = "",
+        const std::string& rebarStatus = ""
     ) {
         std::stringstream ss;
         ss << "{\"protocol_version\":1"
@@ -228,6 +230,8 @@ public:
         if (!storage.empty()) ss << ",\"storage\":\"" << EscapeString(storage) << "\"";
         if (!motherboard.empty()) ss << ",\"motherboard\":\"" << EscapeString(motherboard) << "\"";
         if (!biosVersion.empty()) ss << ",\"bios_version\":\"" << EscapeString(biosVersion) << "\"";
+        if (!xmpProfile.empty()) ss << ",\"xmp_profile\":\"" << EscapeString(xmpProfile) << "\"";
+        if (!rebarStatus.empty()) ss << ",\"resizable_bar\":\"" << EscapeString(rebarStatus) << "\"";
         if (secureBootState == 1) {
             ss << ",\"secure_boot\":true";
         } else if (secureBootState == 0) {

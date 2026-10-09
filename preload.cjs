@@ -53,4 +53,10 @@ contextBridge.exposeInMainWorld('dyarte', {
       return () => ipcRenderer.removeListener('agent:status-changed', sub);
     },
   },
+
+  // Privilégios de Administrador do Windows
+  admin: {
+    isAdmin: () => ipcRenderer.invoke('admin:is-admin'),
+    requestElevation: () => ipcRenderer.invoke('admin:request-elevation'),
+  },
 });

@@ -321,6 +321,10 @@ export interface DyarteElectronAPI {
     restart: () => Promise<any>;
     onStatusChange: (callback: (data: any) => void) => () => void;
   };
+  admin?: {
+    isAdmin: () => Promise<boolean>;
+    requestElevation: () => Promise<{ success: boolean; alreadyAdmin: boolean }>;
+  };
 }
 
 declare global {

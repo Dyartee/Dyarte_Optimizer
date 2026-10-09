@@ -1,24 +1,32 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Plan } from '../../types';
+import { Plan, Tool } from '../../types';
 import {
   Check,
   CheckCircle2,
-  Crown,
   ExternalLink,
-  Flame,
   Gem,
-  HelpCircle,
-  ShieldCheck,
   Zap,
   RotateCcw,
   Download,
-  Play,
+  ListFilter,
+  X,
+  AlertCircle,
+  ShieldAlert,
 } from 'lucide-react';
+
+interface ManualModalState {
+  isOpen: boolean;
+  action: 'apply' | 'rollback';
+  plan: Plan | null;
+  selectedToolIds: string[];
+  progressText: string | null;
+}
 
 export const PlansView: React.FC = () => {
   const {
     plans,
+    tools,
     currentUser,
     config,
     addToast,
@@ -26,12 +34,21 @@ export const PlansView: React.FC = () => {
     applyPlanOptimizations,
     rollbackPlanOptimizations,
     downloadDriverForVendor,
-    installDriverForVendor,
     isOptimizing,
   } = useApp();
 
   const [executingPlanId, setExecutingPlanId] = useState<string | null>(null);
   const [executingAction, setExecutingAction] = useState<'apply' | 'rollback' | null>(null);
+  const [stepProgress, setStepProgress] = useState<string | null>(null);
+
+  // Modal para Aplicar Manualmente / Reverter Manualmente
+  const [manualModal, setManualModal] = useState<ManualModalState>({
+    isOpen: false,
+    action: 'apply',
+    plan: null,
+    selectedToolIds: [],
+    progressText: null,
+  });
 
   const handleExternalBuy = (plan: Plan) => {
     const url = config[plan.checkoutUrlKey] || 'https://dyarte.com/planos';
@@ -41,6 +58,99 @@ export const PlansView: React.FC = () => {
       `${t('toast_checkout_msg')} ${plan.name}: ${url}`
     );
     window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const openManualModal = (plan: Plan, action: 'apply' | 'rollback') => {
+    const planTools = tools.filter((t) => t.required_plan_level <= plan.level);
+    const initialIds =
+      action === 'rollback'
+        ? planTools.filter((t) => t.is_reversible).map((t) => t.tool_id)
+        : planTools.map((t) => t.tool_id);
+
+    setManualModal({
+      isOpen: true,
+      action,
+      plan,
+      selectedToolIds: initialIds,
+      progressText: null,
+    });
+  };
+
+  const closeManualModal = () => {
+    if (isOptimizing) return;
+    setManualModal({
+      isOpen: false,
+      action: 'apply',
+      plan: null,
+      selectedToolIds: [],
+      progressText: null,
+    });
+  };
+
+  const toggleToolSelection = (toolId: string) => {
+    setManualModal((prev) => {
+      const exists = prev.selectedToolIds.includes(toolId);
+      return {
+        ...prev,
+        selectedToolIds: exists
+          ? prev.selectedToolIds.filter((id) => id !== toolId)
+          : [...prev.selectedToolIds, toolId],
+      };
+    });
+  };
+
+  const selectAllTools = (availableIds: string[]) => {
+    setManualModal((prev) => ({
+      ...prev,
+      selectedToolIds: availableIds,
+    }));
+  };
+
+  const deselectAllTools = () => {
+    setManualModal((prev) => ({
+      ...prev,
+      selectedToolIds: [],
+    }));
+  };
+
+  const executeManualAction = async () => {
+    if (!manualModal.plan || manualModal.selectedToolIds.length === 0) return;
+
+    const plan = manualModal.plan;
+    const isApply = manualModal.action === 'apply';
+    setExecutingPlanId(plan.id);
+    setExecutingAction(isApply ? 'apply' : 'rollback');
+
+    try {
+      if (isApply) {
+        await applyPlanOptimizations(
+          plan.level,
+          plan.name,
+          manualModal.selectedToolIds,
+          (step, total) => {
+            const txt = `Aplicando... [${step}/${total}]`;
+            setManualModal((prev) => ({ ...prev, progressText: txt }));
+            setStepProgress(txt);
+          }
+        );
+      } else {
+        await rollbackPlanOptimizations(
+          plan.level,
+          plan.name,
+          manualModal.selectedToolIds,
+          (step, total) => {
+            const txt = `Revertendo... [${step}/${total}]`;
+            setManualModal((prev) => ({ ...prev, progressText: txt }));
+            setStepProgress(txt);
+          }
+        );
+      }
+      closeManualModal();
+    } finally {
+      setExecutingPlanId(null);
+      setExecutingAction(null);
+      setStepProgress(null);
+    }
   };
 
   return (
@@ -70,6 +180,8 @@ export const PlansView: React.FC = () => {
           const isComplete = plan.id === 'completo';
           const isFree = plan.price === 0;
 
+          const isCurrentlyExecuting = executingPlanId === plan.id;
+
           return (
             <div
               key={plan.id}
@@ -77,7 +189,7 @@ export const PlansView: React.FC = () => {
                 isCurrentPlan
                   ? 'bg-gradient-to-b from-[#220d0d] via-[#160b0d] to-[#0f0d12] border-2 border-[#E00000] shadow-[0_0_35px_rgba(224,0,0,0.5)] ring-2 ring-[#E00000]/60 z-10'
                   : isPreviousPlan
-                  ? 'bg-[#0d0d12] border border-zinc-800 text-zinc-500 opacity-60 grayscale-[35%]'
+                  ? 'bg-[#0d0d12] border border-zinc-800 text-zinc-500 opacity-75'
                   : isComplete
                   ? 'bg-gradient-to-b from-[#1c1212] via-[#141015] to-[#0d0d11] border border-[#E00000]/50 hover:border-[#E00000] shadow-[0_0_20px_rgba(224,0,0,0.2)]'
                   : 'bg-[#121218] border border-[#232330] hover:border-[#3a3a4c]'
@@ -147,89 +259,64 @@ export const PlansView: React.FC = () => {
                 </p>
 
                 {/* Price Display */}
-                <div
-                  className={`my-5 pb-5 border-b ${
-                    isCurrentPlan
-                      ? 'border-[#E00000]/40'
-                      : isPreviousPlan
-                      ? 'border-zinc-800/80'
-                      : 'border-zinc-800'
-                  }`}
-                >
-                  {isFree ? (
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="text-2xl font-black font-mono text-emerald-400">
-                        GRATUITO
-                      </span>
-                      <span className="text-xs text-zinc-500 font-mono">/ Vitalício</span>
-                    </div>
-                  ) : (
-                    <div className="flex items-baseline gap-1">
-                      <span className="text-xs text-zinc-400 font-mono">R$</span>
-                      <span
-                        className={`text-3xl font-black font-mono ${
-                          isPreviousPlan ? 'text-zinc-400' : 'text-white'
-                        }`}
-                      >
-                        {plan.price.toFixed(2).replace('.', ',')}
-                      </span>
-                      <span className="text-xs text-zinc-500 font-mono">/{t('plan_period_month')}</span>
-                    </div>
-                  )}
+                <div className="my-4 py-3 px-3.5 rounded-xl bg-zinc-950/60 border border-zinc-800/80 flex items-baseline justify-between">
+                  <div>
+                    <span className="text-2xl font-black font-mono text-white">
+                      {isFree ? 'R$ 0' : `R$ ${plan.price.toFixed(0)}`}
+                    </span>
+                    <span className="text-xs text-zinc-400 ml-1 font-mono">
+                      /{plan.period}
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                    {isFree ? 'Livre' : 'Assinatura'}
+                  </span>
                 </div>
 
                 {/* Features List */}
-                <div className="space-y-2.5 mb-6">
-                  <span className="text-[10px] font-mono uppercase text-zinc-500 font-bold tracking-wider block">
-                    {t('plan_features_label')}:
-                  </span>
+                <ul className="space-y-2 mb-4">
                   {plan.features.map((feature, idx) => (
-                    <div
-                      key={idx}
-                      className={`flex items-start gap-2.5 text-xs ${
-                        isPreviousPlan ? 'text-zinc-500' : 'text-zinc-300'
-                      }`}
-                    >
-                      <div
-                        className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                          isCurrentPlan
-                            ? 'bg-[#E00000] text-white'
-                            : isPreviousPlan
-                            ? 'bg-zinc-800 text-zinc-500'
-                            : isComplete
-                            ? 'bg-[#E00000]/20 text-[#FF4444]'
-                            : 'bg-zinc-800 text-zinc-400'
-                        }`}
-                      >
-                        <Check className="w-2.5 h-2.5" />
-                      </div>
+                    <li key={idx} className="flex items-start gap-2 text-xs text-zinc-300">
+                      <Check className="w-3.5 h-3.5 text-[#FF3333] shrink-0 mt-0.5" />
                       <span className="leading-tight">{feature}</span>
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </div>
 
-              {/* 4 Plan Buttons & Actions */}
+              {/* Action Buttons: 4 Required Buttons + Baixar Driver */}
               <div className="space-y-2 pt-3 border-t border-zinc-800/80">
-                {/* Row 1: APLICAR TUDO & REVERTER TUDO */}
+                {/* Linha 1: APLICAR TUDO & REVERTER TUDO */}
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={async () => {
                       setExecutingPlanId(plan.id);
                       setExecutingAction('apply');
                       try {
-                        await applyPlanOptimizations(plan.level, plan.name);
+                        await applyPlanOptimizations(
+                          plan.level,
+                          plan.name,
+                          undefined,
+                          (step, total) => {
+                            setStepProgress(`Aplicando... [${step}/${total}]`);
+                          }
+                        );
                       } finally {
                         setExecutingPlanId(null);
                         setExecutingAction(null);
+                        setStepProgress(null);
                       }
                     }}
                     disabled={isOptimizing}
                     className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#E00000] hover:bg-[#c50000] text-white shadow-[0_0_15px_rgba(224,0,0,0.35)] disabled:opacity-50"
-                    title="Aplica todas as otimizações deste plano internamente no Windows com status Antes/Depois"
+                    title="Aplica todas as otimizações deste plano internamente no Windows"
                   >
-                    <Zap className={`w-3.5 h-3.5 fill-current ${executingPlanId === plan.id && executingAction === 'apply' ? 'animate-pulse' : ''}`} />
-                    <span>{executingPlanId === plan.id && executingAction === 'apply' ? 'Aplicando...' : 'APLICAR TUDO'}</span>
+                    <Zap className={`w-3.5 h-3.5 fill-current ${isCurrentlyExecuting && executingAction === 'apply' ? 'animate-pulse' : ''}`} />
+                    <span className="truncate">
+                      {isCurrentlyExecuting && executingAction === 'apply'
+                        ? stepProgress || 'Aplicando...'
+                        : 'APLICAR TUDO'}
+                    </span>
                   </button>
 
                   <button
@@ -237,43 +324,69 @@ export const PlansView: React.FC = () => {
                       setExecutingPlanId(plan.id);
                       setExecutingAction('rollback');
                       try {
-                        await rollbackPlanOptimizations(plan.level, plan.name);
+                        await rollbackPlanOptimizations(
+                          plan.level,
+                          plan.name,
+                          undefined,
+                          (step, total) => {
+                            setStepProgress(`Revertendo... [${step}/${total}]`);
+                          }
+                        );
                       } finally {
                         setExecutingPlanId(null);
                         setExecutingAction(null);
+                        setStepProgress(null);
                       }
                     }}
                     disabled={isOptimizing}
                     className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/80 disabled:opacity-50"
-                    title="Reverte todas as otimizações deste plano para o padrão de fábrica do Windows com status Antes/Depois"
+                    title="Reverte todas as otimizações deste plano para o padrão de fábrica do Windows"
                   >
-                    <RotateCcw className={`w-3.5 h-3.5 ${executingPlanId === plan.id && executingAction === 'rollback' ? 'animate-spin' : ''}`} />
-                    <span>{executingPlanId === plan.id && executingAction === 'rollback' ? 'Revertendo...' : 'REVERTER TUDO'}</span>
+                    <RotateCcw className={`w-3.5 h-3.5 ${isCurrentlyExecuting && executingAction === 'rollback' ? 'animate-spin' : ''}`} />
+                    <span className="truncate">
+                      {isCurrentlyExecuting && executingAction === 'rollback'
+                        ? stepProgress || 'Revertendo...'
+                        : 'REVERTER TUDO'}
+                    </span>
                   </button>
                 </div>
 
-                {/* Row 2: BAIXAR DRIVER & INSTALAR DRIVER */}
+                {/* Linha 2: APLICAR MANUALMENTE & REVERTER MANUALMENTE */}
                 <div className="grid grid-cols-2 gap-2">
                   <button
-                    onClick={() => downloadDriverForVendor()}
-                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shadow-sm"
-                    title="Baixar pacote de driver oficial otimizado para o seu hardware"
+                    onClick={() => openManualModal(plan, 'apply')}
+                    disabled={isOptimizing}
+                    className="py-2 px-1.5 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#1c1822] hover:bg-[#282232] text-amber-300 border border-amber-600/30 hover:border-amber-500/60 disabled:opacity-50"
+                    title="Lista onde você marca quais otimizações aplicar e aplica somente as selecionadas"
                   >
-                    <Download className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>BAIXAR DRIVER</span>
+                    <ListFilter className="w-3 h-3 text-amber-400" />
+                    <span className="truncate">APLICAR MANUALMENTE</span>
                   </button>
 
                   <button
-                    onClick={() => installDriverForVendor()}
-                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-blue-950/40 hover:bg-blue-900/60 text-blue-300 border border-blue-700/50 shadow-sm"
-                    title="Iniciar rotina de instalação e calibração do driver no Windows"
+                    onClick={() => openManualModal(plan, 'rollback')}
+                    disabled={isOptimizing}
+                    className="py-2 px-1.5 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#181a20] hover:bg-[#222530] text-blue-300 border border-blue-600/30 hover:border-blue-500/60 disabled:opacity-50"
+                    title="Lista onde você marca quais otimizações reverter e desfaz somente as selecionadas"
                   >
-                    <Play className="w-3.5 h-3.5 fill-current text-blue-400" />
-                    <span>INSTALAR DRIVER</span>
+                    <RotateCcw className="w-3 h-3 text-blue-400" />
+                    <span className="truncate">REVERTER MANUALMENTE</span>
                   </button>
                 </div>
 
-                {/* Status / Purchase Link */}
+                {/* Linha 3: BAIXAR DRIVER */}
+                <div>
+                  <button
+                    onClick={() => downloadDriverForVendor()}
+                    className="w-full py-2 px-2 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shadow-sm"
+                    title="Baixar pacote de driver oficial otimizado para AMD ou NVIDIA"
+                  >
+                    <Download className="w-3 h-3 text-emerald-400" />
+                    <span>BAIXAR DRIVER</span>
+                  </button>
+                </div>
+
+                {/* Linha 4: Status / Link de Assinatura */}
                 <div className="pt-1">
                   {isCurrentPlan ? (
                     <div className="w-full py-2 px-3 rounded-xl bg-zinc-900/90 border border-emerald-600/40 text-emerald-400 text-[10px] font-mono font-bold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
@@ -300,6 +413,204 @@ export const PlansView: React.FC = () => {
           );
         })}
       </div>
+
+      {/* Modal de Seleção Manual (APLICAR MANUALMENTE / REVERTER MANUALMENTE) */}
+      {manualModal.isOpen && manualModal.plan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div className="relative w-full max-w-2xl rounded-2xl bg-[#101016] border border-[#2b2b3d] shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            {/* Header do Modal */}
+            <div className="p-5 border-b border-zinc-800 flex items-center justify-between bg-[#151520]">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-md ${
+                    manualModal.action === 'apply'
+                      ? 'bg-amber-950/70 border border-amber-600/50 text-amber-400'
+                      : 'bg-blue-950/70 border border-blue-600/50 text-blue-400'
+                  }`}
+                >
+                  {manualModal.action === 'apply' ? (
+                    <ListFilter className="w-5 h-5" />
+                  ) : (
+                    <RotateCcw className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white uppercase tracking-tight">
+                    {manualModal.action === 'apply'
+                      ? 'Aplicar Manualmente'
+                      : 'Reverter Manualmente'}{' '}
+                    • Plano {manualModal.plan.name}
+                  </h3>
+                  <span className="text-xs text-zinc-400 font-mono">
+                    Marque as otimizações que deseja{' '}
+                    {manualModal.action === 'apply' ? 'aplicar' : 'reverter'}
+                  </span>
+                </div>
+              </div>
+
+              {!isOptimizing && (
+                <button
+                  onClick={closeManualModal}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </div>
+
+            {/* Ações de Seleção Rápida */}
+            {(() => {
+              const planTools = tools.filter(
+                (t) => t.required_plan_level <= (manualModal.plan?.level ?? 1)
+              );
+              const selectableTools =
+                manualModal.action === 'rollback'
+                  ? planTools.filter((t) => t.is_reversible)
+                  : planTools;
+              const selectableIds = selectableTools.map((t) => t.tool_id);
+
+              return (
+                <div className="px-5 py-3 border-b border-zinc-800/80 bg-[#0d0d14] flex items-center justify-between text-xs font-mono">
+                  <div className="text-zinc-400">
+                    <span className="text-white font-bold">
+                      {manualModal.selectedToolIds.length}
+                    </span>{' '}
+                    de {selectableTools.length} selecionadas
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => selectAllTools(selectableIds)}
+                      disabled={isOptimizing}
+                      className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      Marcar Todas
+                    </button>
+                    <button
+                      onClick={deselectAllTools}
+                      disabled={isOptimizing}
+                      className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      Desmarcar Todas
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Lista com Checkboxes */}
+            <div className="p-5 overflow-y-auto space-y-2.5 flex-1 custom-scrollbar">
+              {tools
+                .filter(
+                  (t) => t.required_plan_level <= (manualModal.plan?.level ?? 1)
+                )
+                .map((tool) => {
+                  const isChecked = manualModal.selectedToolIds.includes(tool.tool_id);
+                  const isRevertAction = manualModal.action === 'rollback';
+                  const isDisabled = isRevertAction && !tool.is_reversible;
+
+                  return (
+                    <div
+                      key={tool.tool_id}
+                      onClick={() => {
+                        if (!isDisabled && !isOptimizing) {
+                          toggleToolSelection(tool.tool_id);
+                        }
+                      }}
+                      className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 transition-all ${
+                        isDisabled
+                          ? 'bg-zinc-950/40 border-zinc-800/60 opacity-50 cursor-not-allowed'
+                          : isChecked
+                          ? manualModal.action === 'apply'
+                            ? 'bg-amber-950/20 border-amber-600/50 cursor-pointer'
+                            : 'bg-blue-950/20 border-blue-600/50 cursor-pointer'
+                          : 'bg-[#14141e] border-zinc-800 hover:border-zinc-700 cursor-pointer'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={isChecked && !isDisabled}
+                          disabled={isDisabled || isOptimizing}
+                          onChange={() => {}}
+                          className={`w-4 h-4 rounded border-zinc-700 focus:ring-0 ${
+                            isDisabled ? 'cursor-not-allowed' : 'cursor-pointer'
+                          }`}
+                        />
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold font-mono text-white">
+                              {tool.nome}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400">
+                              {tool.categoria}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-zinc-400 line-clamp-1 mt-0.5">
+                            {tool.descricao}
+                          </p>
+                        </div>
+                      </div>
+
+                      {isDisabled ? (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-500 whitespace-nowrap">
+                          Sem Reversão (Limpeza)
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                          {tool.impact}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+
+            {/* Rodapé com Botão de Execução e Progresso Claro */}
+            <div className="p-4 border-t border-zinc-800 bg-[#0c0c12] flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="text-xs font-mono text-zinc-400 flex items-center gap-2">
+                {isOptimizing ? (
+                  <span className="text-amber-400 font-bold animate-pulse">
+                    {manualModal.progressText || 'Executando etapa...'}
+                  </span>
+                ) : (
+                  <span>
+                    Apenas os itens selecionados serão alterados no Windows.
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  onClick={closeManualModal}
+                  disabled={isOptimizing}
+                  className="px-4 py-2 rounded-xl text-xs font-mono text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  onClick={executeManualAction}
+                  disabled={
+                    isOptimizing || manualModal.selectedToolIds.length === 0
+                  }
+                  className={`px-5 py-2 rounded-xl text-xs font-mono font-bold uppercase tracking-wider text-white transition-all cursor-pointer shadow-md disabled:opacity-50 ${
+                    manualModal.action === 'apply'
+                      ? 'bg-amber-600 hover:bg-amber-500'
+                      : 'bg-blue-600 hover:bg-blue-500'
+                  }`}
+                >
+                  {isOptimizing
+                    ? manualModal.progressText || 'Executando...'
+                    : manualModal.action === 'apply'
+                    ? `Aplicar Selecionadas (${manualModal.selectedToolIds.length})`
+                    : `Reverter Selecionadas (${manualModal.selectedToolIds.length})`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

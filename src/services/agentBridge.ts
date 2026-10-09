@@ -414,7 +414,7 @@ class AgentBridgeService {
    * Consulta o inventário completo e real de hardware detectado pelo Windows Agent nativo.
    * WMI / Win32 / CIM / SetupAPI / DXGI / Registry / PowerCfg
    */
-  public async getHardwareInventory(timeoutMs = 8000): Promise<{
+  public async getHardwareInventory(timeoutMs = 20000): Promise<{
     success: boolean;
     inventory?: HardwareInventory;
     error?: string;
@@ -441,9 +441,18 @@ class AgentBridgeService {
         resolve: (resp) => {
           clearTimeout(timer);
           if (resp.type === 'HARDWARE_INVENTORY_RESULT') {
+            let inv = resp.inventory;
+            if (typeof inv === 'string') {
+              try {
+                inv = JSON.parse(inv);
+              } catch {
+                // ignore
+              }
+            }
+            this.latestHardwareInventory = inv;
             resolve({
               success: true,
-              inventory: resp.inventory,
+              inventory: inv,
             });
           } else {
             resolve({

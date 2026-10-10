@@ -11,6 +11,7 @@ import { Zap } from 'lucide-react';
 import { AuthView } from './components/views/AuthView';
 import { DashboardView } from './components/views/DashboardView';
 import { OptimizationView } from './components/views/OptimizationView';
+import { CleanupView } from './components/views/CleanupView';
 import { PlansView } from './components/views/PlansView';
 import { ComputerView } from './components/views/ComputerView';
 import { HistoryView } from './components/views/HistoryView';
@@ -28,6 +29,8 @@ const MainAppContent: React.FC = () => {
         return <DashboardView />;
       case 'optimization':
         return <OptimizationView />;
+      case 'cleanup':
+        return <CleanupView />;
       case 'plans':
         return <PlansView />;
       case 'computer':

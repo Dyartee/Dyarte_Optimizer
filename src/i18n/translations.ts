@@ -37,6 +37,7 @@ export const translations: Record<LanguageCode, Record<string, string>> = {
     // Navigation
     nav_dashboard: 'Dashboard',
     nav_optimization: 'Otimização',
+    nav_cleanup: 'Limpeza de Arquivo',
     nav_plans: 'Planos',
     nav_computer: 'Meu Computador',
     nav_history: 'Histórico',
@@ -441,6 +442,7 @@ export const translations: Record<LanguageCode, Record<string, string>> = {
     // Navigation
     nav_dashboard: 'Dashboard',
     nav_optimization: 'Optimization',
+    nav_cleanup: 'File Cleanup',
     nav_plans: 'Plans',
     nav_computer: 'My Computer',
     nav_history: 'History',
@@ -845,6 +847,7 @@ export const translations: Record<LanguageCode, Record<string, string>> = {
     // Navigation
     nav_dashboard: 'Panel de Control',
     nav_optimization: 'Optimización',
+    nav_cleanup: 'Limpieza de Archivos',
     nav_plans: 'Planes',
     nav_computer: 'Mi Computador',
     nav_history: 'Historial',

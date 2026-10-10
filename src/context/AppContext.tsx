@@ -47,6 +47,7 @@ import { optimizationEngine } from '../services/optimizationEngine';
 export type NavView =
   | 'dashboard'
   | 'optimization'
+  | 'cleanup'
   | 'plans'
   | 'computer'
   | 'history'

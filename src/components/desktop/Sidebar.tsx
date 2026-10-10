@@ -3,6 +3,7 @@ import { useApp, NavView } from '../../context/AppContext';
 import {
   LayoutDashboard,
   Zap,
+  Trash2,
   Gem,
   UserCircle2,
   Settings,
@@ -37,6 +38,11 @@ export const Sidebar: React.FC = () => {
       id: 'optimization',
       label: t('nav_optimization'),
       icon: <Zap className="w-4 h-4 text-[#FF3333]" />,
+    },
+    {
+      id: 'cleanup',
+      label: t('nav_cleanup'),
+      icon: <Trash2 className="w-4 h-4 text-purple-400" />,
     },
     {
       id: 'plans',

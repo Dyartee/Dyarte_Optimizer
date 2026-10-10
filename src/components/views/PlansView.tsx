@@ -33,6 +33,7 @@ export const PlansView: React.FC = () => {
     applyPlanOptimizations,
     rollbackPlanOptimizations,
     isOptimizing,
+    openUpgradeModal,
   } = useApp();
 
   const [executingPlanId, setExecutingPlanId] = useState<string | null>(null);
@@ -56,6 +57,54 @@ export const PlansView: React.FC = () => {
       `${t('toast_checkout_msg')} ${plan.name}: ${url}`
     );
     window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleApply = async (plan: Plan, isIncluded: boolean) => {
+    if (!isIncluded) {
+      openUpgradeModal(plan.level, plan.name);
+      addToast(
+        'warning',
+        'Plano Necessário',
+        `Adquira o plano ${plan.name} para aplicar suas otimizações no Windows.`
+      );
+      return;
+    }
+
+    setExecutingPlanId(plan.id);
+    setExecutingAction('apply');
+    try {
+      await applyPlanOptimizations(
+        plan.level,
+        plan.name,
+        undefined,
+        (step, total) => {
+          setStepProgress(`Aplicando... [${step}/${total}]`);
+        }
+      );
+    } finally {
+      setExecutingPlanId(null);
+      setExecutingAction(null);
+      setStepProgress(null);
+    }
+  };
+
+  const handleRollback = async (plan: Plan) => {
+    setExecutingPlanId(plan.id);
+    setExecutingAction('rollback');
+    try {
+      await rollbackPlanOptimizations(
+        plan.level,
+        plan.name,
+        undefined,
+        (step, total) => {
+          setStepProgress(`Revertendo... [${step}/${total}]`);
+        }
+      );
+    } finally {
+      setExecutingPlanId(null);
+      setExecutingAction(null);
+      setStepProgress(null);
+    }
   };
 
   const openManualModal = (plan: Plan, action: 'apply' | 'rollback') => {
@@ -109,6 +158,41 @@ export const PlansView: React.FC = () => {
       ...prev,
       selectedToolIds: [],
     }));
+  };
+
+  const renderToolPlanTag = (level: number) => {
+    switch (level) {
+      case 1:
+        return (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase tracking-wider bg-emerald-950/70 text-emerald-300 border border-emerald-600/50 shadow-sm">
+            FREE
+          </span>
+        );
+      case 2:
+        return (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase tracking-wider bg-blue-950/70 text-blue-300 border border-blue-600/50 shadow-sm">
+            Médio
+          </span>
+        );
+      case 3:
+        return (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase tracking-wider bg-purple-950/70 text-purple-300 border border-purple-600/50 shadow-sm">
+            Avançado
+          </span>
+        );
+      case 4:
+        return (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase tracking-wider bg-rose-950/70 text-rose-300 border border-rose-600/50 shadow-sm">
+            Completo
+          </span>
+        );
+      default:
+        return (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase tracking-wider bg-zinc-800 text-zinc-300">
+            FREE
+          </span>
+        );
+    }
   };
 
   const executeManualAction = async () => {
@@ -177,6 +261,7 @@ export const PlansView: React.FC = () => {
           const isPreviousPlan = userPlanLevel > plan.level;
           const isComplete = plan.id === 'completo';
           const isFree = plan.price === 0;
+          const isIncluded = userPlanLevel >= plan.level || isCurrentPlan || isFree;
 
           const isCurrentlyExecuting = executingPlanId === plan.id;
 
@@ -282,119 +367,80 @@ export const PlansView: React.FC = () => {
                 </ul>
               </div>
 
-              {/* Action Buttons: 4 Required Buttons + Baixar Driver */}
-              <div className="space-y-2 pt-3 border-t border-zinc-800/80">
-                {/* Linha 1: APLICAR TUDO & REVERTER TUDO */}
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={async () => {
-                      setExecutingPlanId(plan.id);
-                      setExecutingAction('apply');
-                      try {
-                        await applyPlanOptimizations(
-                          plan.level,
-                          plan.name,
-                          undefined,
-                          (step, total) => {
-                            setStepProgress(`Aplicando... [${step}/${total}]`);
-                          }
-                        );
-                      } finally {
-                        setExecutingPlanId(null);
-                        setExecutingAction(null);
-                        setStepProgress(null);
-                      }
-                    }}
-                    disabled={isOptimizing}
-                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#E00000] hover:bg-[#c50000] text-white shadow-[0_0_15px_rgba(224,0,0,0.35)] disabled:opacity-50"
-                    title="Aplica todas as otimizações deste plano internamente no Windows"
-                  >
-                    <Zap className={`w-3.5 h-3.5 fill-current ${isCurrentlyExecuting && executingAction === 'apply' ? 'animate-pulse' : ''}`} />
-                    <span className="truncate">
-                      {isCurrentlyExecuting && executingAction === 'apply'
-                        ? stepProgress || 'Aplicando...'
-                        : 'APLICAR TUDO'}
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={async () => {
-                      setExecutingPlanId(plan.id);
-                      setExecutingAction('rollback');
-                      try {
-                        await rollbackPlanOptimizations(
-                          plan.level,
-                          plan.name,
-                          undefined,
-                          (step, total) => {
-                            setStepProgress(`Revertendo... [${step}/${total}]`);
-                          }
-                        );
-                      } finally {
-                        setExecutingPlanId(null);
-                        setExecutingAction(null);
-                        setStepProgress(null);
-                      }
-                    }}
-                    disabled={isOptimizing}
-                    className="py-2.5 px-2 rounded-xl text-[11px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/80 disabled:opacity-50"
-                    title="Reverte todas as otimizações deste plano para o padrão de fábrica do Windows"
-                  >
-                    <RotateCcw className={`w-3.5 h-3.5 ${isCurrentlyExecuting && executingAction === 'rollback' ? 'animate-spin' : ''}`} />
-                    <span className="truncate">
-                      {isCurrentlyExecuting && executingAction === 'rollback'
-                        ? stepProgress || 'Revertendo...'
-                        : 'REVERTER TUDO'}
-                    </span>
-                  </button>
-                </div>
-
-                {/* Linha 2: APLICAR MANUALMENTE & REVERTER MANUALMENTE */}
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => openManualModal(plan, 'apply')}
-                    disabled={isOptimizing}
-                    className="py-2 px-1.5 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#1c1822] hover:bg-[#282232] text-amber-300 border border-amber-600/30 hover:border-amber-500/60 disabled:opacity-50"
-                    title="Lista onde você marca quais otimizações aplicar e aplica somente as selecionadas"
-                  >
-                    <ListFilter className="w-3 h-3 text-amber-400" />
-                    <span className="truncate">APLICAR MANUALMENTE</span>
-                  </button>
-
-                  <button
-                    onClick={() => openManualModal(plan, 'rollback')}
-                    disabled={isOptimizing}
-                    className="py-2 px-1.5 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#181a20] hover:bg-[#222530] text-blue-300 border border-blue-600/30 hover:border-blue-500/60 disabled:opacity-50"
-                    title="Lista onde você marca quais otimizações reverter e desfaz somente as selecionadas"
-                  >
-                    <RotateCcw className="w-3 h-3 text-blue-400" />
-                    <span className="truncate">REVERTER MANUALMENTE</span>
-                  </button>
-                </div>
-
-
-
-                {/* Linha 4: Status / Link de Assinatura */}
-                <div className="pt-1">
-                  {isCurrentPlan ? (
-                    <div className="w-full py-2 px-3 rounded-xl bg-zinc-900/90 border border-emerald-600/40 text-emerald-400 text-[10px] font-mono font-bold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>{t('plan_current_active')}</span>
-                    </div>
-                  ) : isPreviousPlan ? (
-                    <div className="w-full py-2 px-3 rounded-xl bg-zinc-900/80 border border-zinc-800 text-zinc-400 text-[10px] font-mono font-semibold text-center uppercase tracking-wider flex items-center justify-center gap-1.5">
-                      <Check className="w-3 h-3 text-zinc-500" />
-                      <span>{t('plan_included_in_plan')}</span>
+              {/* Opções do Plano: Adquirir/Incluso no plano, Aplicar e Reverter */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-800/80">
+                {/* Opção 1: Adquirir OU Incluso no plano */}
+                <div>
+                  {isIncluded ? (
+                    <div className="w-full py-2.5 px-3 rounded-xl bg-emerald-950/40 border border-emerald-600/50 text-emerald-400 text-xs font-mono font-bold text-center uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      <span>Incluso no plano</span>
                     </div>
                   ) : (
                     <button
+                      type="button"
                       onClick={() => handleExternalBuy(plan)}
-                      className="w-full py-2 px-3 rounded-xl text-[10px] font-mono font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700"
+                      className="w-full py-2.5 px-3 rounded-xl text-xs font-mono font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer bg-gradient-to-r from-[#E00000] to-[#b30000] hover:from-[#ff1a1a] hover:to-[#cc0000] text-white shadow-[0_0_20px_rgba(224,0,0,0.4)] border border-[#ff4d4d]/40"
                     >
-                      <span>{isFree ? 'Plano Ativo Grátis' : t('plan_buy_official')}</span>
-                      {!isFree && <ExternalLink className="w-3 h-3 text-zinc-400" />}
+                      <span>Adquirir</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
                     </button>
                   )}
+                </div>
+
+                {/* Opções 2 e 3: Aplicar e Reverter */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleApply(plan, isIncluded)}
+                    disabled={isOptimizing}
+                    className="py-2.5 px-2 rounded-xl text-xs font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#E00000] hover:bg-[#c50000] text-white shadow-[0_0_15px_rgba(224,0,0,0.35)] disabled:opacity-50"
+                    title="Aplica as otimizações deste plano no Windows"
+                  >
+                    <Zap
+                      className={`w-3.5 h-3.5 fill-current ${
+                        isCurrentlyExecuting && executingAction === 'apply' ? 'animate-pulse' : ''
+                      }`}
+                    />
+                    <span className="truncate">
+                      {isCurrentlyExecuting && executingAction === 'apply'
+                        ? stepProgress || 'Aplicando...'
+                        : 'Aplicar'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleRollback(plan)}
+                    disabled={isOptimizing}
+                    className="py-2.5 px-2 rounded-xl text-xs font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/80 disabled:opacity-50"
+                    title="Reverte as otimizações deste plano para o padrão de fábrica do Windows"
+                  >
+                    <RotateCcw
+                      className={`w-3.5 h-3.5 ${
+                        isCurrentlyExecuting && executingAction === 'rollback' ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span className="truncate">
+                      {isCurrentlyExecuting && executingAction === 'rollback'
+                        ? stepProgress || 'Revertendo...'
+                        : 'Reverter'}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Opção para Personalizar seleção (Manual) */}
+                <div className="flex items-center justify-center pt-1 text-[11px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => openManualModal(plan, 'apply')}
+                    disabled={isOptimizing}
+                    className="text-zinc-400 hover:text-amber-400 transition-colors cursor-pointer flex items-center gap-1"
+                    title="Escolha individualmente quais ferramentas aplicar ou reverter"
+                  >
+                    <ListFilter className="w-3 h-3 text-amber-500" />
+                    <span>Personalizar seleção</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -530,9 +576,7 @@ export const PlansView: React.FC = () => {
                             <span className="text-xs font-bold font-mono text-white">
                               {tool.nome}
                             </span>
-                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400">
-                              {tool.categoria}
-                            </span>
+                            {renderToolPlanTag(tool.required_plan_level)}
                           </div>
                           <p className="text-[11px] text-zinc-400 line-clamp-1 mt-0.5">
                             {tool.descricao}
@@ -540,13 +584,9 @@ export const PlansView: React.FC = () => {
                         </div>
                       </div>
 
-                      {isDisabled ? (
+                      {isDisabled && (
                         <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-500 whitespace-nowrap">
                           Sem Reversão (Limpeza)
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap">
-                          {tool.impact}
                         </span>
                       )}
                     </div>

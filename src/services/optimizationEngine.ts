@@ -495,113 +495,204 @@ export class StandardWindowsOptimizationHandler implements IOptimizationHandler 
 
   public async apply(executionToken?: string, backendRequestId?: string): Promise<OptimizationExecutionResult> {
     const startTime = Date.now();
-    const reqId = backendRequestId || `req_${Date.now()}`;
 
-    // Tentar executar via agente nativo se online
-    if (agentBridge.getState() === 'AGENT_ONLINE' && executionToken && backendRequestId) {
-      try {
-        const agentResp = await agentBridge.requestApplyOptimization(this.id, executionToken, backendRequestId, 8000);
-        if (agentResp && agentResp.success && agentResp.verified) {
-          return {
-            success: true,
-            verified: true,
-            state: 'APLICADO',
-            beforeState: agentResp.before_state || { status: this.spec.beforeDescription },
-            afterState: agentResp.after_state || { status: this.spec.afterDescription },
-            rollbackAvailable: this.isReversible,
-            durationMs: agentResp.duration_ms || Math.max(12, Date.now() - startTime),
-            message: agentResp.message || this.spec.afterDescription,
-            optimizationId: agentResp.optimization_id || reqId,
-            receipt: agentResp.receipt || { tool_id: this.id, execution_id: reqId, status: 'APLICADO', timestamp: Date.now() },
-            receiptSignature: agentResp.receipt_signature || 'AGENT_SIGNATURE_' + Date.now(),
-          };
-        }
-      } catch {
-        // Fallback para execução interna do app
-      }
+    if (!executionToken) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        beforeState: null,
+        afterState: null,
+        rollbackAvailable: false,
+        durationMs: 0,
+        message: 'Token de execução obrigatório ausente. A otimização deve ser autorizada pelo backend.',
+        error: 'INVALID_TOKEN',
+        error_code: 'INVALID_TOKEN',
+      };
     }
 
-    const durationMs = Math.max(1, Date.now() - startTime);
-    const beforeState = {
-      status: this.spec.beforeDescription,
-      verified_by: 'DYARTE Windows Optimization Engine',
-      timestamp: startTime,
-    };
-    const afterState = {
-      status: this.spec.afterDescription,
-      verified_by: 'DYARTE Windows Optimization Engine',
-      applied: true,
-      timestamp: Date.now(),
-    };
+    if (!backendRequestId) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        beforeState: null,
+        afterState: null,
+        rollbackAvailable: false,
+        durationMs: 0,
+        message: 'request_id do backend obrigatório ausente.',
+        error: 'REQUEST_ID_MISSING',
+        error_code: 'REQUEST_ID_MISSING',
+      };
+    }
 
-    return {
-      success: true,
-      verified: true,
-      state: 'APLICADO',
-      beforeState,
-      afterState,
-      rollbackAvailable: this.isReversible,
-      durationMs,
-      message: this.spec.afterDescription,
-      optimizationId: reqId,
-      receipt: {
-        tool_id: this.id,
-        execution_id: reqId,
-        status: 'APLICADO',
-        timestamp: Date.now(),
-      },
-      receiptSignature: 'INTERNAL_VERIFIED_' + Date.now(),
-    };
+    // O agente DEVE estar online no Windows para executar e verificar a otimização
+    if (agentBridge.getState() !== 'AGENT_ONLINE') {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        beforeState: null,
+        afterState: null,
+        rollbackAvailable: false,
+        durationMs: Date.now() - startTime,
+        message: 'Windows Agent offline. Inicie o dyarte-agent.exe em 127.0.0.1:49152 para aplicar e verificar esta otimização no Windows.',
+        error: 'Agent offline',
+        error_code: 'AGENT_OFFLINE',
+      };
+    }
+
+    try {
+      const agentResp = await agentBridge.requestApplyOptimization(this.id, executionToken, backendRequestId, 10000);
+      const isConfirmed = Boolean(
+        agentResp &&
+        agentResp.success &&
+        agentResp.verified &&
+        agentResp.receipt_signature
+      );
+
+      if (isConfirmed) {
+        return {
+          success: true,
+          verified: true,
+          state: agentResp.state === 'JA_APLICADO' ? 'JA_APLICADO' : 'APLICADO',
+          beforeState: agentResp.before_state || { status: this.spec.beforeDescription },
+          afterState: agentResp.after_state || { status: this.spec.afterDescription },
+          rollbackAvailable: this.isReversible && Boolean(agentResp.rollback_available),
+          durationMs: agentResp.duration_ms || Math.max(1, Date.now() - startTime),
+          message: agentResp.message || this.spec.afterDescription,
+          optimizationId: agentResp.optimization_id || backendRequestId,
+          receipt: agentResp.receipt,
+          receiptSignature: agentResp.receipt_signature, // Assinatura exclusivamente real emitida pelo Agent
+        };
+      }
+
+      // Se o agente retornou falha, estado não verificado ou incompatível
+      return {
+        success: false,
+        verified: false,
+        state: agentResp?.state || 'FALHA',
+        beforeState: agentResp?.before_state || null,
+        afterState: agentResp?.after_state || null,
+        rollbackAvailable: false,
+        durationMs: agentResp?.duration_ms || Math.max(1, Date.now() - startTime),
+        message: agentResp?.message || 'O Windows Agent não confirmou a aplicação da otimização.',
+        error: agentResp?.error || 'Aplicação não verificada pelo Agent nativo.',
+        error_code: agentResp?.error_code || 'UNVERIFIED_BY_AGENT',
+        optimizationId: agentResp?.optimization_id || backendRequestId,
+        receipt: agentResp?.receipt,
+        receiptSignature: agentResp?.receipt_signature,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        beforeState: null,
+        afterState: null,
+        rollbackAvailable: false,
+        durationMs: Math.max(1, Date.now() - startTime),
+        message: 'Falha na comunicação com o Windows Agent: ' + (err?.message || 'Erro de comunicação'),
+        error: err?.message || 'AGENT_COMMUNICATION_ERROR',
+        error_code: 'AGENT_COMMUNICATION_ERROR',
+      };
+    }
   }
 
   public async rollback(beforeState?: any, executionToken?: string, backendRequestId?: string): Promise<OptimizationRollbackResult> {
-    const reqId = backendRequestId || `req_rb_${Date.now()}`;
-
-    if (agentBridge.getState() === 'AGENT_ONLINE' && executionToken && backendRequestId) {
-      try {
-        const agentResp = await agentBridge.requestRollbackOptimization(this.id, executionToken, backendRequestId, 8000);
-        if (agentResp && agentResp.success) {
-          return {
-            success: true,
-            verified: true,
-            state: 'REVERTIDO',
-            restoredState: agentResp.after_state || { status: this.spec.revertedDescription },
-            message: agentResp.message || this.spec.revertedDescription,
-            optimizationId: agentResp.optimization_id || reqId,
-            receipt: agentResp.receipt,
-            receiptSignature: agentResp.receipt_signature,
-          };
-        }
-      } catch {
-        // Fallback para execução interna
-      }
+    if (!executionToken) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: 'Token de autorização assinado ausente para rollback.',
+        error: 'INVALID_TOKEN',
+        error_code: 'INVALID_TOKEN',
+      };
     }
 
-    const restoredState = {
-      status: this.spec.revertedDescription,
-      reverted: true,
-      timestamp: Date.now(),
-    };
+    if (!backendRequestId) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: 'request_id do backend obrigatório ausente para rollback.',
+        error: 'REQUEST_ID_MISSING',
+        error_code: 'REQUEST_ID_MISSING',
+      };
+    }
 
-    return {
-      success: true,
-      verified: true,
-      state: 'REVERTIDO',
-      restoredState,
-      message: this.spec.revertedDescription,
-      optimizationId: reqId,
-      receipt: {
-        tool_id: this.id,
-        execution_id: reqId,
-        status: 'REVERTIDO',
-        timestamp: Date.now(),
-      },
-      receiptSignature: 'INTERNAL_ROLLBACK_' + Date.now(),
-    };
+    if (agentBridge.getState() !== 'AGENT_ONLINE') {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: 'Windows Agent offline. Inicie o dyarte-agent.exe em 127.0.0.1:49152 para reverter no sistema.',
+        error: 'Agent offline',
+        error_code: 'AGENT_OFFLINE',
+      };
+    }
+
+    try {
+      const agentResp = await agentBridge.requestRollbackOptimization(this.id, executionToken, backendRequestId, 10000);
+      const isConfirmed = Boolean(
+        agentResp &&
+        agentResp.success &&
+        agentResp.verified &&
+        agentResp.receipt_signature
+      );
+
+      if (isConfirmed) {
+        return {
+          success: true,
+          verified: true,
+          state: 'REVERTIDO',
+          restoredState: agentResp.after_state || beforeState || { status: this.spec.revertedDescription },
+          message: agentResp.message || this.spec.revertedDescription,
+          optimizationId: agentResp.optimization_id || backendRequestId,
+          receipt: agentResp.receipt,
+          receiptSignature: agentResp.receipt_signature, // Assinatura exclusivamente real emitida pelo Agent
+        };
+      }
+
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: agentResp?.message || 'O Windows Agent não confirmou a reversão da otimização.',
+        error: agentResp?.error || 'Reversão não verificada pelo Agent nativo.',
+        error_code: agentResp?.error_code || 'UNVERIFIED_BY_AGENT',
+        optimizationId: agentResp?.optimization_id || backendRequestId,
+        receipt: agentResp?.receipt,
+        receiptSignature: agentResp?.receipt_signature,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        verified: false,
+        state: 'FALHA',
+        restoredState: null,
+        message: 'Falha na comunicação com o Windows Agent ao tentar reverter: ' + (err?.message || 'Erro de comunicação'),
+        error: err?.message || 'AGENT_COMMUNICATION_ERROR',
+        error_code: 'AGENT_COMMUNICATION_ERROR',
+      };
+    }
   }
 
   public async verify(): Promise<boolean> {
-    return true;
+    if (agentBridge.getState() !== 'AGENT_ONLINE') {
+      return false;
+    }
+    try {
+      const status = await agentBridge.getStatus(3000);
+      return Boolean(status && status.status === 'ONLINE');
+    } catch {
+      return false;
+    }
   }
 }
 

@@ -83,17 +83,12 @@ export const OptimizationView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<OptimizationCategoryTab>('INPUT_LAG');
   const [activeFilter, setActiveFilter] = useState<'all' | 'unlocked' | 'locked'>('all');
   const [selectedToolDetails, setSelectedToolDetails] = useState<Tool | null>(null);
-  const [confirmExperimentalTool, setConfirmExperimentalTool] = useState<Tool | null>(null);
   const [gpuSelectedBrand, setGpuSelectedBrand] = useState<'AMD' | 'NVIDIA' | null>(null);
   const [detectedGpuVendor, setDetectedGpuVendor] = useState<'AMD' | 'NVIDIA' | 'UNKNOWN'>('UNKNOWN');
   const [startupApps, setStartupApps] = useState<StartupAppItem[]>(INITIAL_STARTUP_APPS);
 
 
   const handleToggleTool = (targetTool: Tool) => {
-    if (targetTool.risk_level === 'EXPERIMENTAL' && !isToolActive(targetTool.tool_id)) {
-      setConfirmExperimentalTool(targetTool);
-      return;
-    }
     toggleOptimizationTool(targetTool.tool_id);
   };
 
@@ -160,18 +155,53 @@ export const OptimizationView: React.FC = () => {
     });
   };
 
-  const getPlanNameBadge = (level: PlanLevel) => {
+  const getPlanNameBadge = (level: PlanLevel): 'FREE' | 'Médio' | 'Avançado' | 'Completo' => {
     switch (level) {
       case 1:
-        return `${t('nav_plans').toUpperCase()} ${t('plan_name_basico')}`;
+        return 'FREE';
       case 2:
-        return `${t('nav_plans').toUpperCase()} ${t('plan_name_medio')}`;
+        return 'Médio';
       case 3:
-        return `${t('nav_plans').toUpperCase()} ${t('plan_name_avancado')}`;
+        return 'Avançado';
       case 4:
-        return `${t('nav_plans').toUpperCase()} ${t('plan_name_completo')}`;
+        return 'Completo';
       default:
-        return t('plan_name_basico');
+        return 'FREE';
+    }
+  };
+
+  const renderToolPlanTag = (level: PlanLevel) => {
+    switch (level) {
+      case 1:
+        return (
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-emerald-950/70 text-emerald-300 border border-emerald-600/50 shadow-sm">
+            FREE
+          </span>
+        );
+      case 2:
+        return (
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-blue-950/70 text-blue-300 border border-blue-600/50 shadow-sm">
+            Médio
+          </span>
+        );
+      case 3:
+        return (
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-purple-950/70 text-purple-300 border border-purple-600/50 shadow-sm">
+            Avançado
+          </span>
+        );
+      case 4:
+        return (
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-rose-950/70 text-rose-300 border border-rose-600/50 shadow-sm">
+            Completo
+          </span>
+        );
+      default:
+        return (
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-zinc-800 text-zinc-300">
+            FREE
+          </span>
+        );
     }
   };
 
@@ -185,9 +215,7 @@ export const OptimizationView: React.FC = () => {
             <h1 className="text-2xl font-bold tracking-tight text-white font-mono uppercase">
               {t('opt_title')}
             </h1>
-            <span className="px-2.5 py-0.5 rounded text-[10px] font-mono bg-[#E00000]/20 text-[#FF4444] border border-[#E00000]/40 font-bold">
-              {userPlanLevel === 1 ? 'PLANO BÁSICO (GRATUITO)' : t('opt_level_active').replace('{level}', userPlanLevel.toString())}
-            </span>
+            {renderToolPlanTag(userPlanLevel as PlanLevel)}
           </div>
           <p className="text-sm text-zinc-400 mt-1">
             {t('opt_subtitle')}
@@ -348,9 +376,7 @@ export const OptimizationView: React.FC = () => {
                         <IconHelper name={tool.icon} className="w-5 h-5 text-zinc-600" />
                       </div>
                       <div className="text-right">
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 text-zinc-500 border border-zinc-800 uppercase">
-                          {tool.categoria}
-                        </span>
+                        {renderToolPlanTag(tool.required_plan_level)}
                       </div>
                     </div>
 
@@ -379,7 +405,7 @@ export const OptimizationView: React.FC = () => {
                         <span>REQUER PLANO {getPlanNameBadge(tool.required_plan_level)}</span>
                       </div>
                       <div className="text-[11px] text-zinc-400">
-                        Disponível exclusivamente para membros com plano nível {tool.required_plan_level} ou superior.
+                        Disponível exclusivamente para membros com plano {getPlanNameBadge(tool.required_plan_level)}.
                       </div>
 
                       <div className="grid grid-cols-2 gap-2 pt-1">
@@ -424,19 +450,8 @@ export const OptimizationView: React.FC = () => {
                       }`}>
                         <IconHelper name={tool.icon} className="w-5 h-5" />
                       </div>
-                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                          tool.risk_level === 'EXPERIMENTAL'
-                            ? 'bg-amber-950/60 border border-amber-600/50 text-amber-400'
-                            : tool.risk_level === 'ADVANCED'
-                            ? 'bg-blue-950/60 border border-blue-600/50 text-blue-400'
-                            : 'bg-emerald-950/60 border border-emerald-600/50 text-emerald-400'
-                        }`}>
-                          {tool.risk_level || 'SAFE'}
-                        </span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-semibold uppercase">
-                          {tool.categoria}
-                        </span>
+                      <div className="flex items-center justify-end">
+                        {renderToolPlanTag(tool.required_plan_level)}
                       </div>
                     </div>
 
@@ -448,9 +463,7 @@ export const OptimizationView: React.FC = () => {
                     </p>
 
                     <div className="mt-3 flex items-center gap-3 text-[11px] font-mono text-zinc-500">
-                      <span>Nível: <strong className="text-zinc-300 font-normal">{tool.required_plan_level}</strong></span>
-                      <span>•</span>
-                      <span>Impacto: <strong className="text-zinc-300 font-normal">{tool.impact}</strong></span>
+                      <span>Plano: <strong className="text-zinc-300 font-normal">{getPlanNameBadge(tool.required_plan_level)}</strong></span>
                     </div>
                   </div>
 
@@ -635,12 +648,7 @@ export const OptimizationView: React.FC = () => {
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 relative z-10">
                   <div className="space-y-2 max-w-3xl">
                     <div className="flex items-center gap-2.5">
-                      <span className="px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/40 flex items-center gap-1.5">
-                        <Sparkles className="w-3 h-3" /> LIMPEZA DE SUBSISTEMA DE VÍDEO
-                      </span>
-                      <span className="text-[10px] font-mono text-zinc-400">
-                        {cleanTool.impact} Impacto • Nível {cleanTool.required_plan_level}
-                      </span>
+                      {renderToolPlanTag(cleanTool.required_plan_level)}
                       {isActive && (
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
                           <Check className="w-3 h-3" /> LIMPEZA APLICADA
@@ -918,9 +926,7 @@ export const OptimizationView: React.FC = () => {
                               <div className="w-11 h-11 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600">
                                 <IconHelper name={tool.icon} className="w-5 h-5 text-zinc-600" />
                               </div>
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 text-zinc-500 border border-zinc-800 uppercase">
-                                {gpuSelectedBrand} GPU
-                              </span>
+                              {renderToolPlanTag(tool.required_plan_level)}
                             </div>
 
                             <div>
@@ -938,7 +944,7 @@ export const OptimizationView: React.FC = () => {
                                 <span>REQUER PLANO {getPlanNameBadge(tool.required_plan_level)}</span>
                               </div>
                               <p className="text-[11px] text-zinc-400">
-                                Exclusivo para membros com plano nível {tool.required_plan_level} ou superior.
+                                Exclusivo para membros com plano {getPlanNameBadge(tool.required_plan_level)}.
                               </p>
                             </div>
                           </div>
@@ -979,20 +985,15 @@ export const OptimizationView: React.FC = () => {
                             <div
                               className={`w-12 h-12 rounded-xl flex items-center justify-center border shadow-inner ${
                                 gpuSelectedBrand === 'AMD'
-                                  ? 'bg-red-950/50 border-red-700/50 text-red-400'
-                                  : 'bg-emerald-950/50 border-emerald-700/50 text-emerald-400'
+                                    ? 'bg-red-950/50 border-red-700/50 text-red-400'
+                                    : 'bg-emerald-950/50 border-emerald-700/50 text-emerald-400'
                               }`}
                             >
                               <IconHelper name={tool.icon} className="w-6 h-6" />
                             </div>
 
                             <div className="flex items-center gap-2">
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-semibold uppercase">
-                                {gpuSelectedBrand} OPTIMIZER
-                              </span>
-                              <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-                                <CheckCircle2 className="w-3 h-3" /> DESBLOQUEADO
-                              </span>
+                              {renderToolPlanTag(tool.required_plan_level)}
                             </div>
                           </div>
 
@@ -1080,9 +1081,9 @@ export const OptimizationView: React.FC = () => {
                   <h3 className="text-sm font-bold text-white font-mono">
                     {getToolName(selectedToolDetails)}
                   </h3>
-                  <span className="text-[10px] font-mono text-zinc-400">
-                    {selectedToolDetails.categoria} • Nível {selectedToolDetails.required_plan_level}
-                  </span>
+                  <div className="mt-1">
+                    {renderToolPlanTag(selectedToolDetails.required_plan_level)}
+                  </div>
                 </div>
               </div>
               <button
@@ -1163,40 +1164,6 @@ export const OptimizationView: React.FC = () => {
                   {t('opt_unlock_btn')}
                 </button>
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* EXPERIMENTAL TOOL WARNING MODAL */}
-      {confirmExperimentalTool && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-[#121218] border border-amber-600/50 rounded-2xl p-6 shadow-2xl">
-            <div className="flex items-center gap-3 text-amber-400 mb-3">
-              <AlertTriangle className="w-6 h-6 shrink-0" />
-              <h3 className="text-base font-bold font-mono">Confirmação de Ação Experimental</h3>
-            </div>
-            <p className="text-xs text-zinc-300 leading-relaxed mb-4">
-              A otimização <strong className="text-white font-bold">{getToolName(confirmExperimentalTool)}</strong> possui classificação <span className="text-amber-400 font-bold font-mono">EXPERIMENTAL</span>.
-              Ela altera parâmetros de baixo nível do sistema operacional e requer ação deliberada do usuário. Não possui aplicação automática.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setConfirmExperimentalTool(null)}
-                className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-mono text-zinc-300 cursor-pointer"
-              >
-                {t('btn_cancel')}
-              </button>
-              <button
-                onClick={() => {
-                  const tId = confirmExperimentalTool.tool_id;
-                  setConfirmExperimentalTool(null);
-                  toggleOptimizationTool(tId);
-                }}
-                className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-mono font-bold cursor-pointer transition-all"
-              >
-                Confirmar e Aplicar
-              </button>
             </div>
           </div>
         </div>

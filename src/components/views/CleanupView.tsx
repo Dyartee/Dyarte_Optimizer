@@ -105,8 +105,8 @@ export const CleanupView: React.FC = () => {
               <Trash2 className="w-6 h-6 text-purple-400" />
               <span>Limpeza de Arquivo</span>
             </h1>
-            <span className="px-2.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold">
-              {userPlanLevel === 1 ? 'PLANO BÁSICO (GRATUITO)' : `PLANO NÍVEL ${userPlanLevel}`}
+            <span className="text-[10px] font-mono px-2.5 py-0.5 rounded font-extrabold uppercase tracking-wider bg-emerald-950/70 text-emerald-300 border border-emerald-600/50 shadow-sm">
+              FREE
             </span>
           </div>
           <p className="text-sm text-zinc-400 mt-1">

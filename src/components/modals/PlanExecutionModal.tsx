@@ -30,13 +30,23 @@ export const PlanExecutionModal: React.FC = () => {
                   {isApply ? 'Otimizações Aplicadas:' : 'Otimizações Revertidas:'} {planExecutionModal.planName}
                 </h3>
                 <span
-                  className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                    isApply
-                      ? 'bg-[#E00000]/20 text-[#FF5555] border border-[#E00000]/40'
-                      : 'bg-emerald-950 text-emerald-300 border border-emerald-700/50'
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded font-extrabold uppercase ${
+                    planExecutionModal.planLevel === 1
+                      ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-600/50'
+                      : planExecutionModal.planLevel === 2
+                      ? 'bg-blue-950/70 text-blue-300 border border-blue-600/50'
+                      : planExecutionModal.planLevel === 3
+                      ? 'bg-purple-950/70 text-purple-300 border border-purple-600/50'
+                      : 'bg-rose-950/70 text-rose-300 border border-rose-600/50'
                   }`}
                 >
-                  NÍVEL {planExecutionModal.planLevel}
+                  {planExecutionModal.planLevel === 1
+                    ? 'FREE'
+                    : planExecutionModal.planLevel === 2
+                    ? 'Médio'
+                    : planExecutionModal.planLevel === 3
+                    ? 'Avançado'
+                    : 'Completo'}
                 </span>
               </div>
               <p className="text-xs text-zinc-400 mt-0.5">
@@ -56,7 +66,7 @@ export const PlanExecutionModal: React.FC = () => {
         {/* Body with Items List */}
         <div className="p-6 overflow-y-auto space-y-3.5 flex-1 custom-scrollbar">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 px-1 pb-1">
-            <span>FERRAMENTA / CATEGORIA</span>
+            <span>FERRAMENTA</span>
             <span>STATUS ANTES ➔ DEPOIS</span>
           </div>
 
@@ -76,9 +86,6 @@ export const PlanExecutionModal: React.FC = () => {
                       <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
                     )}
                     <span className="text-sm font-bold font-mono text-white">{item.toolName}</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
-                      {item.category}
-                    </span>
                   </div>
 
                   <div className="flex items-center gap-2">

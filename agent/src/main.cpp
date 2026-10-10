@@ -893,8 +893,8 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
             }
 #endif
 
-            if (toolId == "tool_perf_cpu_basic" || toolId == "tool_sys_win_opt") {
-                stepRes = Optimizations::ApplyDebloatWin10();
+            if (toolId == "tool_perf_cpu_basic") {
+                stepRes = Optimizations::ApplyCpuBasic();
             } else if (toolId == "tool_sys_cleanup" || toolId == "tool_gpu_clean_drivers") {
                 auto clean = CacheCleaner::RunFullCleanup();
                 stepRes.success = clean.success;
@@ -903,23 +903,38 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                 stepRes.beforeState = "{\"freed_bytes\":0}";
                 stepRes.afterState = "{\"freed_bytes\":" + std::to_string(clean.freedBytes) + ",\"freed_mb\":" + std::to_string(clean.freedMb) + "}";
             } else if (toolId == "tool_perf_memory") {
-                stepRes = Optimizations::ApplyMMAgent();
+                stepRes = Optimizations::ApplyMemory();
+            } else if (toolId == "tool_sys_win_opt") {
+                stepRes = Optimizations::ApplyWinOpt();
+            } else if (toolId == "tool_sys_startup") {
+                stepRes = Optimizations::ApplyStartup();
+            } else if (toolId == "tool_sys_proc_manager") {
+                stepRes = Optimizations::ApplyProcManager();
+            } else if (toolId == "tool_sys_stability") {
+                stepRes = Optimizations::ApplyStability();
+            } else if (toolId == "tool_sys_advanced_tweaks") {
+                stepRes = Optimizations::ApplyAdvancedTweaks();
+            } else if (toolId == "tool_perf_latency_settings") {
+                stepRes = Optimizations::ApplyLatencySettings();
+            } else if (toolId == "tool_game_fps_tweaks") {
+                stepRes = Optimizations::ApplyGameFpsTweaks();
+            } else if (toolId == "tool_game_gpu_opt") {
+                stepRes = Optimizations::ApplyGameGpuOpt();
+            } else if (toolId == "tool_gpu_amd_opt" || toolId == "tool_gpu_amd_driver") {
+                stepRes = Optimizations::ApplyAmdOpt();
+            } else if (toolId == "tool_gpu_nvidia_opt" || toolId == "tool_gpu_nvidia_driver") {
+                stepRes = Optimizations::ApplyNvidiaOpt();
+            } else if (toolId == "tool_perf_dpc_extreme") {
+                stepRes = Optimizations::ApplyDpcExtreme();
             } else if (toolId == "tool_game_input_lag") {
-                stepRes = Optimizations::ApplyInputResponsiveness();
-            } else if (toolId == "tool_perf_latency_settings" || toolId == "tool_game_fps_tweaks") {
-                stepRes = Optimizations::ApplyBcdeditTweaks();
-            } else if (toolId == "tool_perf_dpc_extreme" || toolId == "tool_game_exclusive_suite" ||
-                       toolId == "tool_game_gpu_opt" || toolId == "tool_gpu_amd_opt" ||
-                       toolId == "tool_gpu_nvidia_opt" || toolId == "tool_sys_advanced_tweaks" ||
-                       toolId == "tool_sys_startup" || toolId == "tool_sys_proc_manager" ||
-                       toolId == "tool_sys_stability") {
-                stepRes = Optimizations::ApplyCompletePerformanceTweaks();
+                stepRes = Optimizations::ApplyInputLag();
+            } else if (toolId == "tool_game_exclusive_suite") {
+                stepRes = Optimizations::ApplyExclusiveSuite();
             } else {
-                stepRes.success = true;
+                stepRes.success = false;
                 stepRes.toolId = toolId;
-                stepRes.beforeState = "{\"status\":\"padrão\"}";
-                stepRes.afterState = "{\"status\":\"otimizado\"}";
-                stepRes.message = "Otimização " + toolId + " aplicada com sucesso.";
+                stepRes.errorCode = "TOOL_NOT_IMPLEMENTED";
+                stepRes.message = "Ferramenta " + toolId + " não implementada no Agent nativo.";
             }
 
             auto optEndTime = std::chrono::steady_clock::now();
@@ -1219,20 +1234,36 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     break;
                 }
 #endif
-                if (toolId == "tool_perf_cpu_basic" || toolId == "tool_sys_win_opt") {
-                    rbRes = Optimizations::RollbackDebloatWin10();
+                if (toolId == "tool_perf_cpu_basic") {
+                    rbRes = Optimizations::RollbackCpuBasic();
                 } else if (toolId == "tool_perf_memory") {
-                    rbRes = Optimizations::RollbackMMAgent();
+                    rbRes = Optimizations::RollbackMemory();
+                } else if (toolId == "tool_sys_win_opt") {
+                    rbRes = Optimizations::RollbackWinOpt();
+                } else if (toolId == "tool_sys_startup") {
+                    rbRes = Optimizations::RollbackStartup();
+                } else if (toolId == "tool_sys_proc_manager") {
+                    rbRes = Optimizations::RollbackProcManager();
+                } else if (toolId == "tool_sys_stability") {
+                    rbRes = Optimizations::RollbackStability();
+                } else if (toolId == "tool_sys_advanced_tweaks") {
+                    rbRes = Optimizations::RollbackAdvancedTweaks();
+                } else if (toolId == "tool_perf_latency_settings") {
+                    rbRes = Optimizations::RollbackLatencySettings();
+                } else if (toolId == "tool_game_fps_tweaks") {
+                    rbRes = Optimizations::RollbackGameFpsTweaks();
+                } else if (toolId == "tool_game_gpu_opt") {
+                    rbRes = Optimizations::RollbackGameGpuOpt();
+                } else if (toolId == "tool_gpu_amd_opt" || toolId == "tool_gpu_amd_driver") {
+                    rbRes = Optimizations::RollbackAmdOpt();
+                } else if (toolId == "tool_gpu_nvidia_opt" || toolId == "tool_gpu_nvidia_driver") {
+                    rbRes = Optimizations::RollbackNvidiaOpt();
+                } else if (toolId == "tool_perf_dpc_extreme") {
+                    rbRes = Optimizations::RollbackDpcExtreme();
                 } else if (toolId == "tool_game_input_lag") {
-                    rbRes = Optimizations::RollbackInputResponsiveness();
-                } else if (toolId == "tool_perf_latency_settings" || toolId == "tool_game_fps_tweaks") {
-                    rbRes = Optimizations::RollbackBcdeditTweaks();
-                } else if (toolId == "tool_perf_dpc_extreme" || toolId == "tool_game_exclusive_suite" ||
-                           toolId == "tool_game_gpu_opt" || toolId == "tool_gpu_amd_opt" ||
-                           toolId == "tool_gpu_nvidia_opt" || toolId == "tool_sys_advanced_tweaks" ||
-                           toolId == "tool_sys_startup" || toolId == "tool_sys_proc_manager" ||
-                           toolId == "tool_sys_stability") {
-                    rbRes = Optimizations::RollbackCompletePerformanceTweaks();
+                    rbRes = Optimizations::RollbackInputLag();
+                } else if (toolId == "tool_game_exclusive_suite") {
+                    rbRes = Optimizations::RollbackExclusiveSuite();
                 } else if (toolId == "tool_restore_factory_defaults") {
                     auto full = Optimizations::RestoreFullWindowsFactoryDefaults();
                     rbRes.success = true;
@@ -1240,10 +1271,10 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
                     rbRes.message = "Todas as otimizações foram restauradas para o padrão de fábrica do Windows.";
                     rbRes.afterState = "{\"factory_defaults_restored\":true}";
                 } else {
-                    rbRes.success = true;
+                    rbRes.success = false;
                     rbRes.toolId = toolId;
-                    rbRes.message = "Configuração de " + toolId + " restaurada com sucesso para o padrão de fábrica.";
-                    rbRes.afterState = "{\"status\":\"padrão_restaurado\"}";
+                    rbRes.errorCode = "TOOL_NOT_IMPLEMENTED";
+                    rbRes.message = "Reversão para " + toolId + " não implementada no Agent.";
                 }
             }
 
@@ -1286,15 +1317,131 @@ void HandleIncomingClientMessage(SocketHandle clientSock, const std::string& raw
             std::string vendor = json.get_field_string("vendor", "UNKNOWN");
             Logger::Instance().Info("EXECUTE_DRIVER_PACKAGE received for vendor: " + vendor + " (Request ID: " + requestId + ")");
 
+            if (vendor != "AMD" && vendor != "NVIDIA") {
+                std::string response = ResponseBuilder::BuildDriverPackageResult(
+                    requestId,
+                    vendor,
+                    "Erro",
+                    false,
+                    "Fabricante de GPU inválido: '" + vendor + "'. O DYARTE Optimizer suporta exclusivamente AMD e NVIDIA."
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+#ifdef _WIN32
+            if (!AdminHelper::IsProcessElevated()) {
+                Logger::Instance().Warn("EXECUTE_DRIVER_PACKAGE rejected: Process not elevated. Requesting UAC elevation...");
+                AdminHelper::RequestElevation();
+                std::string response = ResponseBuilder::BuildDriverPackageResult(
+                    requestId,
+                    vendor,
+                    "Erro",
+                    false,
+                    "Privilégios de Administrador são obrigatórios para instalar drivers no Windows."
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            // Busca o instalador em drivers/AMD/Setup.exe ou drivers/NVIDIA/Setup.exe
+            std::vector<fs::path> candidatePaths = {
+                fs::current_path() / "drivers" / vendor / "Setup.exe",
+                fs::current_path() / ".." / "drivers" / vendor / "Setup.exe",
+                fs::current_path() / ".." / ".." / "drivers" / vendor / "Setup.exe",
+                fs::current_path() / ".." / ".." / ".." / "drivers" / vendor / "Setup.exe"
+            };
+
+            // Também tenta resolver pelo caminho do executável do agente
+            char exeModulePath[MAX_PATH];
+            if (GetModuleFileNameA(NULL, exeModulePath, MAX_PATH) > 0) {
+                fs::path agentDir = fs::path(exeModulePath).parent_path();
+                candidatePaths.push_back(agentDir / "drivers" / vendor / "Setup.exe");
+                candidatePaths.push_back(agentDir / ".." / "drivers" / vendor / "Setup.exe");
+                candidatePaths.push_back(agentDir / ".." / ".." / "drivers" / vendor / "Setup.exe");
+                candidatePaths.push_back(agentDir / ".." / ".." / ".." / "drivers" / vendor / "Setup.exe");
+            }
+
+            fs::path installerPath;
+            bool found = false;
+            for (const auto& p : candidatePaths) {
+                std::error_code ec;
+                if (fs::exists(p, ec) && !fs::is_directory(p, ec)) {
+                    installerPath = fs::canonical(p, ec);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                std::string notFoundMsg = "Instalador drivers/" + vendor + "/Setup.exe não encontrado na pasta local. O arquivo deve ser exatamente drivers/" + vendor + "/Setup.exe.";
+                Logger::Instance().Error("EXECUTE_DRIVER_PACKAGE: " + notFoundMsg);
+                std::string response = ResponseBuilder::BuildDriverPackageResult(
+                    requestId,
+                    vendor,
+                    "Erro",
+                    false,
+                    notFoundMsg
+                );
+                g_serverInstance->SendTextMessage(clientSock, response);
+                break;
+            }
+
+            // Notifica progresso: Instalando...
+            std::string progressMsg = ResponseBuilder::BuildDriverPackageResult(
+                requestId,
+                vendor,
+                "Instalando...",
+                true,
+                "Iniciando instalador oficial Setup.exe de " + vendor + " com privilégios de Administrador..."
+            );
+            g_serverInstance->SendTextMessage(clientSock, progressMsg);
+
+            Logger::Instance().Info("Launching driver installer: " + installerPath.string() + " with Administrator privileges...");
+
+            SHELLEXECUTEINFOA sei = { sizeof(sei) };
+            sei.lpVerb = "runas";
+            sei.lpFile = installerPath.string().c_str();
+            std::string workingDir = installerPath.parent_path().string();
+            sei.lpDirectory = workingDir.c_str();
+            sei.nShow = SW_SHOWNORMAL;
+            sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+            if (ShellExecuteExA(&sei) && sei.hProcess != NULL) {
+                // Aguarda finalização ou desassocia de forma segura
+                DWORD waitRes = WaitForSingleObject(sei.hProcess, 5000);
+                CloseHandle(sei.hProcess);
+
+                std::string compMsg = ResponseBuilder::BuildDriverPackageResult(
+                    requestId,
+                    vendor,
+                    "Concluído",
+                    true,
+                    "Instalador oficial Setup.exe de " + vendor + " executado com sucesso."
+                );
+                g_serverInstance->SendTextMessage(clientSock, compMsg);
+                Logger::Instance().Info("Driver installer execution completed successfully.");
+            } else {
+                std::string errMsg = ResponseBuilder::BuildDriverPackageResult(
+                    requestId,
+                    vendor,
+                    "Erro",
+                    false,
+                    "Falha ao executar Setup.exe com elevação de Administrador no Windows."
+                );
+                g_serverInstance->SendTextMessage(clientSock, errMsg);
+                Logger::Instance().Error("ShellExecuteExA failed for driver installer.");
+            }
+#else
             std::string response = ResponseBuilder::BuildDriverPackageResult(
                 requestId,
                 vendor,
-                "NOT_IMPLEMENTED",
+                "Erro",
                 false,
-                "Execucao de driver via socket no Agent nao implementada. Utilize o DriverService nativo do Electron com Setup.exe verificado."
+                "Execução de drivers de vídeo requer o sistema operacional Windows."
             );
             g_serverInstance->SendTextMessage(clientSock, response);
-            Logger::Instance().Warn("EXECUTE_DRIVER_PACKAGE rejected: Driver execution not implemented in Agent socket.");
+#endif
             break;
         }
 

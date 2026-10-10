@@ -27,7 +27,38 @@ import {
   Layers,
   ShieldCheck,
   RotateCcw,
+  MousePointerClick,
+  Gauge,
 } from 'lucide-react';
+
+export type OptimizationCategoryTab =
+  | 'INPUT_LAG'
+  | 'DESEMPENHO'
+  | 'INICIALIZACAO'
+  | 'SISTEMA'
+  | 'CLEANUP'
+  | 'GPU';
+
+export interface StartupAppItem {
+  id: string;
+  name: string;
+  exe: string;
+  publisher: string;
+  impact: 'ALTO' | 'MÉDIO' | 'BAIXO';
+  delay: string;
+  enabled: boolean;
+}
+
+const INITIAL_STARTUP_APPS: StartupAppItem[] = [
+  { id: 'discord', name: 'Discord', exe: 'Update.exe --processStart Discord.exe', publisher: 'Discord Inc.', impact: 'ALTO', delay: '~1.8s', enabled: false },
+  { id: 'spotify', name: 'Spotify Music', exe: 'Spotify.exe --autostart', publisher: 'Spotify AB', impact: 'MÉDIO', delay: '~0.9s', enabled: false },
+  { id: 'steam', name: 'Steam Client Bootstrapper', exe: 'steam.exe -silent', publisher: 'Valve Corporation', impact: 'ALTO', delay: '~2.2s', enabled: false },
+  { id: 'epic', name: 'Epic Games Launcher', exe: 'EpicGamesLauncher.exe -silent', publisher: 'Epic Games, Inc.', impact: 'ALTO', delay: '~2.5s', enabled: false },
+  { id: 'onedrive', name: 'Microsoft OneDrive', exe: 'OneDrive.exe /background', publisher: 'Microsoft Corporation', impact: 'MÉDIO', delay: '~1.1s', enabled: false },
+  { id: 'teams', name: 'Microsoft Teams', exe: 'ms-teams.exe --autostart', publisher: 'Microsoft Corporation', impact: 'MÉDIO', delay: '~1.4s', enabled: false },
+  { id: 'creative_cloud', name: 'Adobe Creative Cloud', exe: 'Creative Cloud.exe --minimize', publisher: 'Adobe Inc.', impact: 'ALTO', delay: '~2.8s', enabled: false },
+  { id: 'edge_boost', name: 'Microsoft Edge Startup Boost', exe: 'msedge.exe --no-startup-window', publisher: 'Microsoft Corporation', impact: 'BAIXO', delay: '~0.6s', enabled: false },
+];
 
 export const OptimizationView: React.FC = () => {
   const {
@@ -44,20 +75,19 @@ export const OptimizationView: React.FC = () => {
     config,
     device,
     addToast,
-    downloadDriverForVendor,
     detectAndSetRealHardware,
     t,
     getToolName,
     getToolDesc,
   } = useApp();
 
-  type MainTab = 'OPTIONS' | 'CLEANUP' | 'GPU';
-  const [activeTab, setActiveTab] = useState<MainTab>('OPTIONS');
+  const [activeTab, setActiveTab] = useState<OptimizationCategoryTab>('INPUT_LAG');
   const [activeFilter, setActiveFilter] = useState<'all' | 'unlocked' | 'locked'>('all');
   const [selectedToolDetails, setSelectedToolDetails] = useState<Tool | null>(null);
   const [confirmExperimentalTool, setConfirmExperimentalTool] = useState<Tool | null>(null);
   const [gpuSelectedBrand, setGpuSelectedBrand] = useState<'AMD' | 'NVIDIA' | null>(null);
   const [detectedGpuVendor, setDetectedGpuVendor] = useState<'AMD' | 'NVIDIA' | 'UNKNOWN'>('UNKNOWN');
+  const [startupApps, setStartupApps] = useState<StartupAppItem[]>(INITIAL_STARTUP_APPS);
 
   // Estado dedicado da aba de limpeza de arquivos temporários
   const [cleanupRunning, setCleanupRunning] = useState(false);
@@ -117,17 +147,28 @@ export const OptimizationView: React.FC = () => {
   const isAmdGpuDetected = detectedGpuVendor === 'AMD';
   const isNvidiaGpuDetected = detectedGpuVendor === 'NVIDIA';
 
-  // Grade de Otimizações por Opção (exclui ferramentas de limpeza e de driver da GPU, mantidas em suas abas próprias)
-  const optionTools = tools.filter((tool) => {
-    if (tool.tool_id === 'tool_sys_cleanup' || tool.tool_id === 'tool_gpu_clean_drivers') return false;
-    if (tool.tool_id === 'tool_gpu_amd_driver' || tool.tool_id === 'tool_gpu_nvidia_driver') return false;
-    if (tool.tool_id === 'tool_gpu_amd_opt' || tool.tool_id === 'tool_gpu_nvidia_opt') return false;
+  // Ferramentas categorizadas nas 4 abas de ajustes do sistema
+  const INPUT_LAG_TOOL_IDS = ['tool_game_input_lag', 'tool_perf_latency_settings', 'tool_perf_dpc_extreme'];
+  const DESEMPENHO_TOOL_IDS = ['tool_perf_cpu_basic', 'tool_perf_power_plan', 'tool_perf_memory', 'tool_game_fps_tweaks', 'tool_game_exclusive_suite'];
+  const INICIALIZACAO_TOOL_IDS = ['tool_sys_startup'];
+  const SISTEMA_TOOL_IDS = ['tool_sys_win_opt', 'tool_sys_proc_manager', 'tool_sys_stability', 'tool_sys_advanced_tweaks'];
 
-    const isUnlocked = userPlanLevel >= tool.required_plan_level;
-    if (activeFilter === 'unlocked' && !isUnlocked) return false;
-    if (activeFilter === 'locked' && isUnlocked) return false;
-    return true;
-  });
+  const getToolsForCurrentTab = (tab: OptimizationCategoryTab) => {
+    let ids: string[] = [];
+    if (tab === 'INPUT_LAG') ids = INPUT_LAG_TOOL_IDS;
+    else if (tab === 'DESEMPENHO') ids = DESEMPENHO_TOOL_IDS;
+    else if (tab === 'INICIALIZACAO') ids = INICIALIZACAO_TOOL_IDS;
+    else if (tab === 'SISTEMA') ids = SISTEMA_TOOL_IDS;
+    else return [];
+
+    return tools.filter((tool) => {
+      if (!ids.includes(tool.tool_id)) return false;
+      const isUnlocked = userPlanLevel >= tool.required_plan_level;
+      if (activeFilter === 'unlocked' && !isUnlocked) return false;
+      if (activeFilter === 'locked' && isUnlocked) return false;
+      return true;
+    });
+  };
 
   const getPlanNameBadge = (level: PlanLevel) => {
     switch (level) {
@@ -230,49 +271,85 @@ export const OptimizationView: React.FC = () => {
         </div>
       </div>
 
-      {/* NAVEGAÇÃO ENTRE ABAS DO PAINEL (Sem barra de categorias horizontal antiga) */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 rounded-xl bg-[#111117] border border-[#20202c]">
-        {/* As 3 Abas Principais: Otimizações por Opção, Limpeza de Arquivos Temporários, GPU */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+      {/* NAVEGAÇÃO ENTRE AS 6 ABAS DO PAINEL */}
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 p-2 rounded-xl bg-[#111117] border border-[#20202c]">
+        {/* As 6 Abas Oficiais */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 xl:pb-0 scrollbar-thin">
           <button
-            onClick={() => setActiveTab('OPTIONS')}
-            className={`px-4 py-2.5 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
-              activeTab === 'OPTIONS'
+            onClick={() => setActiveTab('INPUT_LAG')}
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'INPUT_LAG'
                 ? 'bg-[#E00000] text-white shadow-[0_0_12px_rgba(224,0,0,0.4)]'
                 : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
             }`}
           >
-            <Sliders className="w-4 h-4" />
-            <span>OTIMIZAÇÕES POR OPÇÃO</span>
+            <MousePointerClick className="w-3.5 h-3.5" />
+            <span>1. INPUT LAG</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('DESEMPENHO')}
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'DESEMPENHO'
+                ? 'bg-[#E00000] text-white shadow-[0_0_12px_rgba(224,0,0,0.4)]'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Gauge className="w-3.5 h-3.5" />
+            <span>2. DESEMPENHO</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('INICIALIZACAO')}
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'INICIALIZACAO'
+                ? 'bg-[#E00000] text-white shadow-[0_0_12px_rgba(224,0,0,0.4)]'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>3. INICIALIZAÇÃO</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('SISTEMA')}
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'SISTEMA'
+                ? 'bg-[#E00000] text-white shadow-[0_0_12px_rgba(224,0,0,0.4)]'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>4. SISTEMA</span>
           </button>
 
           <button
             onClick={() => setActiveTab('CLEANUP')}
-            className={`px-4 py-2.5 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'CLEANUP'
                 ? 'bg-purple-600 text-white shadow-[0_0_12px_rgba(147,51,234,0.4)]'
                 : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
             }`}
           >
-            <Trash2 className="w-4 h-4 text-purple-400" />
-            <span>LIMPEZA DE ARQUIVOS TEMPORÁRIOS</span>
+            <Trash2 className="w-3.5 h-3.5 text-purple-400" />
+            <span>5. LIMPEZA DE ARQUIVOS TEMPORÁRIOS</span>
           </button>
 
           <button
             onClick={() => setActiveTab('GPU')}
-            className={`px-4 py-2.5 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-3 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'GPU'
                 ? 'bg-rose-600 text-white shadow-[0_0_12px_rgba(225,29,72,0.4)]'
                 : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
             }`}
           >
-            <Activity className="w-4 h-4 text-rose-400" />
-            <span>GPU (DRIVERS & TWEAKS)</span>
+            <Activity className="w-3.5 h-3.5 text-rose-400" />
+            <span>6. GPU (DRIVERS & TWEAKS)</span>
           </button>
         </div>
 
-        {/* Filtros de desbloqueio apenas para a grade de opções */}
-        {activeTab === 'OPTIONS' && (
+        {/* Filtros de desbloqueio para as abas de opções */}
+        {['INPUT_LAG', 'DESEMPENHO', 'INICIALIZACAO', 'SISTEMA'].includes(activeTab) && (
           <div className="flex items-center gap-1 bg-[#0c0c10] p-1 rounded-lg border border-[#1f1f2a] text-[11px] font-mono shrink-0">
             <button
               onClick={() => setActiveFilter('all')}
@@ -280,7 +357,7 @@ export const OptimizationView: React.FC = () => {
                 activeFilter === 'all' ? 'bg-zinc-800 text-white font-semibold' : 'text-zinc-400 hover:text-white'
               }`}
             >
-              {t('opt_filter_all')} ({optionTools.length})
+              Todos ({getToolsForCurrentTab(activeTab).length})
             </button>
             <button
               onClick={() => setActiveFilter('unlocked')}
@@ -302,18 +379,38 @@ export const OptimizationView: React.FC = () => {
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* ABA 1: OTIMIZAÇÕES POR OPÇÃO (GRADE DE CARDS COM TOGGLES INDIVIDUAIS)      */}
-      {/* ========================================================================= */}
-      {activeTab === 'OPTIONS' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs font-mono text-zinc-400 px-1">
-            <span>Ajustes individuais do sistema operacional com reversão determinística ao padrão de fábrica:</span>
-            <span>{optionTools.length} opções disponíveis</span>
+      {/* RENDERIZADOR PADRONIZADO DE GRADE DE CARDS POR CATEGORIA */}
+      {['INPUT_LAG', 'DESEMPENHO', 'INICIALIZACAO', 'SISTEMA'].includes(activeTab) && (
+        <div className="space-y-6">
+          {/* Cabeçalho da Categoria Ativa */}
+          <div className="p-4 rounded-xl bg-[#0e0e14] border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono">
+            <div className="flex items-center gap-2.5 text-zinc-300">
+              {activeTab === 'INPUT_LAG' && <MousePointerClick className="w-4 h-4 text-[#FF4444]" />}
+              {activeTab === 'DESEMPENHO' && <Gauge className="w-4 h-4 text-[#FF4444]" />}
+              {activeTab === 'INICIALIZACAO' && <Zap className="w-4 h-4 text-[#FF4444]" />}
+              {activeTab === 'SISTEMA' && <Sliders className="w-4 h-4 text-[#FF4444]" />}
+              <span className="font-bold text-white uppercase tracking-wider">
+                {activeTab === 'INPUT_LAG' && '1. INPUT LAG'}
+                {activeTab === 'DESEMPENHO' && '2. DESEMPENHO'}
+                {activeTab === 'INICIALIZACAO' && '3. INICIALIZAÇÃO'}
+                {activeTab === 'SISTEMA' && '4. SISTEMA'}
+              </span>
+              <span className="text-zinc-600 hidden sm:inline">•</span>
+              <span className="text-zinc-400 font-normal">
+                {activeTab === 'INPUT_LAG' && 'Registro de teclado, mouse, polling rate e timer resolution'}
+                {activeTab === 'DESEMPENHO' && 'Tweaks de registro de CPU, plano de energia Dyarte, RAM e HAGS'}
+                {activeTab === 'INICIALIZACAO' && 'Aceleração de boot e gerenciamento de inicializadores do Windows'}
+                {activeTab === 'SISTEMA' && 'Debloat básico do Windows, telemetria e estabilidade de kernel'}
+              </span>
+            </div>
+            <span className="text-zinc-400">
+              {getToolsForCurrentTab(activeTab).length} opções disponíveis
+            </span>
           </div>
 
+          {/* Grade de Ferramentas com Toggles Interativos */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {optionTools.map((tool) => {
+            {getToolsForCurrentTab(activeTab).map((tool) => {
               const isPermitted = userPlanLevel >= tool.required_plan_level;
               const isExecuting = activeOptimizingToolId === tool.tool_id;
               const active = isToolActive(tool.tool_id);
@@ -492,6 +589,95 @@ export const OptimizationView: React.FC = () => {
               );
             })}
           </div>
+
+          {/* Gerenciador Adicional de Inicialização exclusivo para a aba INICIALIZAÇÃO */}
+          {activeTab === 'INICIALIZACAO' && (
+            <div className="p-6 rounded-2xl bg-[#101018] border border-zinc-800 space-y-4 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800/80">
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-amber-400" />
+                    <span>Programas que Iniciam com o Windows</span>
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Desative aplicativos em segundo plano para reduzir o tempo de boot e liberar memória RAM ao iniciar o PC.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setStartupApps((prev) => prev.map((app) => ({ ...app, enabled: false })));
+                      addToast('success', 'Inicialização Otimizada', 'Todos os aplicativos secundários de inicialização foram desativados.');
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-mono font-semibold transition-all cursor-pointer border border-zinc-700"
+                  >
+                    Desativar Todos Não Essenciais
+                  </button>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-zinc-800/80 text-zinc-500 uppercase text-[10px]">
+                      <th className="py-2.5 px-3">Aplicativo</th>
+                      <th className="py-2.5 px-3">Fornecedor</th>
+                      <th className="py-2.5 px-3">Impacto no Boot</th>
+                      <th className="py-2.5 px-3">Atraso Estimado</th>
+                      <th className="py-2.5 px-3 text-right">Status / Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/50">
+                    {startupApps.map((app) => (
+                      <tr key={app.id} className="hover:bg-zinc-900/40 transition-colors">
+                        <td className="py-3 px-3">
+                          <strong className="text-white block">{app.name}</strong>
+                          <span className="text-[10px] text-zinc-500 truncate max-w-xs block">{app.exe}</span>
+                        </td>
+                        <td className="py-3 px-3 text-zinc-400">{app.publisher}</td>
+                        <td className="py-3 px-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            app.impact === 'ALTO'
+                              ? 'bg-red-950/80 text-red-400 border border-red-800/50'
+                              : app.impact === 'MÉDIO'
+                              ? 'bg-amber-950/80 text-amber-400 border border-amber-800/50'
+                              : 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/50'
+                          }`}>
+                            {app.impact}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-zinc-300 font-bold">{app.delay}</td>
+                        <td className="py-3 px-3 text-right">
+                          <button
+                            onClick={() => {
+                              setStartupApps((prev) =>
+                                prev.map((item) =>
+                                  item.id === app.id ? { ...item, enabled: !item.enabled } : item
+                                )
+                              );
+                              addToast(
+                                app.enabled ? 'info' : 'success',
+                                `Inicialização: ${app.name}`,
+                                app.enabled ? `${app.name} ativado na inicialização.` : `${app.name} desativado da inicialização.`
+                              );
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                              app.enabled
+                                ? 'bg-red-950 text-red-300 hover:bg-red-900 border border-red-800/60'
+                                : 'bg-emerald-950 text-emerald-300 hover:bg-emerald-900 border border-emerald-800/60'
+                            }`}
+                          >
+                            {app.enabled ? 'DESATIVAR' : 'ATIVAR'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1162,23 +1348,7 @@ export const OptimizationView: React.FC = () => {
                           </button>
 
                           <div className="flex items-center gap-2.5">
-                            {/* BOTAO ESSENCIAL: BAIXAR DRIVER */}
-                            {isDriverOptimizer && (
-                              <button
-                                onClick={async () => {
-                                  if (gpuSelectedBrand) {
-                                    await downloadDriverForVendor(gpuSelectedBrand);
-                                  }
-                                }}
-                                className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-zinc-700 shadow-sm"
-                                title={`Baixar pacote de drivers otimizados para ${gpuSelectedBrand}`}
-                              >
-                                <Download className="w-3.5 h-3.5 text-zinc-300" />
-                                <span>BAIXAR DRIVER</span>
-                              </button>
-                            )}
-
-                            {/* BOTAO ESSENCIAL: EXECUTAR */}
+                            {/* BOTAO EXCLUSIVO: EXECUTAR */}
                             <button
                               onClick={async () => {
                                 if (isDriverOptimizer && gpuSelectedBrand) {

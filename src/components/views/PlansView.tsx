@@ -8,7 +8,6 @@ import {
   Gem,
   Zap,
   RotateCcw,
-  Download,
   ListFilter,
   X,
   AlertCircle,
@@ -33,7 +32,6 @@ export const PlansView: React.FC = () => {
     t,
     applyPlanOptimizations,
     rollbackPlanOptimizations,
-    downloadDriverForVendor,
     isOptimizing,
   } = useApp();
 
@@ -374,17 +372,7 @@ export const PlansView: React.FC = () => {
                   </button>
                 </div>
 
-                {/* Linha 3: BAIXAR DRIVER */}
-                <div>
-                  <button
-                    onClick={() => downloadDriverForVendor()}
-                    className="w-full py-2 px-2 rounded-xl text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shadow-sm"
-                    title="Baixar pacote de driver oficial otimizado para AMD ou NVIDIA"
-                  >
-                    <Download className="w-3 h-3 text-emerald-400" />
-                    <span>BAIXAR DRIVER</span>
-                  </button>
-                </div>
+
 
                 {/* Linha 4: Status / Link de Assinatura */}
                 <div className="pt-1">
